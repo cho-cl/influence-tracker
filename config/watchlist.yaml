@@ -1,0 +1,167 @@
+# Influence Tracker watchlist. Edit freely; handles are checked on the next run and
+# `influence status` lists any that fail to resolve.
+#
+# Account categories: politician | investor | short_seller | exec | influencer | media
+
+x:
+  monthly_budget_usd: 10.0
+  cost_per_post_read_usd: 0.005
+  cost_per_user_read_usd: 0.010
+  # Day of the month your X billing cycle resets (see the X developer console).
+  billing_cycle_day: 1
+  accounts:
+    - { handle: elonmusk, category: exec }
+    - { handle: jimcramer, category: media }
+    - { handle: CathieDWood, category: investor }
+    - { handle: BillAckman, category: investor }
+    - { handle: chamath, category: investor }
+    - { handle: michaeljburry, category: investor }
+    - { handle: TheRoaringKitty, category: influencer }
+    - { handle: saylor, category: exec }
+    - { handle: brian_armstrong, category: exec }
+    - { handle: muddywatersre, category: short_seller }
+    - { handle: CitronResearch, category: short_seller }
+    - { handle: realDonaldTrump, category: politician }
+    - { handle: WhiteHouse, category: politician }
+    - { handle: JDVance, category: politician }
+    - { handle: SecScottBessent, category: politician }
+    - { handle: howardlutnick, category: politician }
+    - { handle: DavidSacks, category: politician }
+
+truthsocial:
+  # Truth Social rate-limits bursts (Cloudflare 429 / error 1015). Keep this >= 5.
+  min_request_interval_s: 5.0
+  first_run_days: 30
+  accounts:
+    - { handle: realDonaldTrump, category: politician }
+    - { handle: JDVance1, category: politician }
+    - { handle: WhiteHouse, category: politician }
+    - { handle: PressSec, category: politician }
+    - { handle: DonaldJTrumpJr, category: influencer }
+    - { handle: EricTrump, category: exec }
+    - { handle: DevinNunes, category: exec }
+
+reddit:
+  subreddits: [wallstreetbets, stocks, investing, StockMarket, options]
+  rss_limit: 100
+
+apewisdom:
+  filters: [all-stocks, wallstreetbets]
+  pages: 3
+
+prices:
+  # Yahoo keeps 1-minute bars for 30 days; stay a day inside that.
+  backfill_days: 29
+  request_pause_s: 1.0
+
+# Uppercase words that are also tickers but usually mean something else. Bare (no $)
+# ticker matching only runs on Reddit, and skips these.
+bare_ticker_stoplist: [CAT, ARM, COST, SHOP, SPOT, SNAP, HOOD, COIN, MAT, PEP, XYZ, DIS]
+
+# names:            matched case-insensitively on word boundaries.
+# ambiguous_names:  must be capitalized AND appear with a finance word (stock, shares, buy, ...).
+# aliases:          other symbols that mean the same company ($GOOG -> GOOGL).
+# benchmark:        market proxies; never analyzed as events.
+tickers:
+  - { symbol: SPY, benchmark: true }
+  - { symbol: QQQ, benchmark: true }
+
+  # Mega-cap tech
+  - { symbol: AAPL, ambiguous_names: [Apple] }
+  - { symbol: MSFT, names: [Microsoft] }
+  - { symbol: NVDA, names: [Nvidia] }
+  - { symbol: AMZN, ambiguous_names: [Amazon] }
+  - { symbol: GOOGL, names: [Google], ambiguous_names: [Alphabet], aliases: [GOOG] }
+  - { symbol: META, names: [Facebook], ambiguous_names: [Meta], aliases: [FB] }
+  - { symbol: TSLA, names: [Tesla] }
+  - { symbol: NFLX, names: [Netflix] }
+
+  # Semis / AI / software
+  - { symbol: AMD, names: [AMD] }
+  - { symbol: INTC, ambiguous_names: [Intel] }
+  - { symbol: AVGO, names: [Broadcom] }
+  - { symbol: TSM, names: [TSMC, Taiwan Semiconductor] }
+  - { symbol: MU, ambiguous_names: [Micron] }
+  - { symbol: ARM, names: [Arm Holdings] }
+  - { symbol: SMCI, names: [Supermicro, Super Micro] }
+  - { symbol: PLTR, names: [Palantir] }
+  - { symbol: ORCL, ambiguous_names: [Oracle] }
+  - { symbol: CRM, names: [Salesforce] }
+  - { symbol: ADBE, names: [Adobe] }
+  - { symbol: IBM, names: [IBM] }
+  - { symbol: QCOM, names: [Qualcomm] }
+  - { symbol: CRWV, names: [CoreWeave] }
+
+  # Retail / meme / fintech / crypto-adjacent
+  - { symbol: GME, names: [GameStop] }
+  - { symbol: AMC, ambiguous_names: [AMC] }
+  - { symbol: HOOD, ambiguous_names: [Robinhood] }
+  - { symbol: SOFI, names: [SoFi] }
+  - { symbol: COIN, names: [Coinbase] }
+  - { symbol: MSTR, names: [MicroStrategy] }
+  - { symbol: RDDT }
+  - { symbol: PYPL, names: [PayPal] }
+  - { symbol: XYZ, names: [Cash App], ambiguous_names: [Block, Square], aliases: [SQ] }
+
+  # EV / autos / industrials
+  - { symbol: RIVN, names: [Rivian] }
+  - { symbol: LCID, names: [Lucid Motors, Lucid Group], ambiguous_names: [Lucid] }
+  - { symbol: NIO, names: [NIO] }
+  - { symbol: F, ambiguous_names: [Ford] }
+  - { symbol: GM, names: [General Motors] }
+  - { symbol: BA, names: [Boeing] }
+  - { symbol: CAT, ambiguous_names: [Caterpillar] }
+  - { symbol: DE, names: [John Deere, Deere] }
+
+  # Defense
+  - { symbol: LMT, names: [Lockheed Martin, Lockheed] }
+  - { symbol: RTX, names: [Raytheon] }
+  - { symbol: NOC, names: [Northrop Grumman, Northrop] }
+  - { symbol: GD, names: [General Dynamics] }
+
+  # Consumer / retail
+  - { symbol: WMT, names: [Walmart] }
+  - { symbol: TGT, ambiguous_names: [Target] }
+  - { symbol: COST, names: [Costco] }
+  - { symbol: NKE, names: [Nike] }
+  - { symbol: MCD, names: ["McDonald's", McDonalds] }
+  - { symbol: SBUX, names: [Starbucks] }
+  - { symbol: DIS, names: [Disney] }
+  - { symbol: MAT, names: [Mattel] }
+  - { symbol: HD, names: [Home Depot] }
+  - { symbol: KO, names: [Coca-Cola], ambiguous_names: [Coke] }
+  - { symbol: PEP, names: [PepsiCo, Pepsi] }
+  - { symbol: UBER, ambiguous_names: [Uber] }
+  - { symbol: ABNB, names: [Airbnb] }
+  - { symbol: SNAP, names: [Snapchat], ambiguous_names: [Snap] }
+  - { symbol: SHOP, names: [Shopify] }
+  - { symbol: SPOT, names: [Spotify] }
+  - { symbol: BABA, names: [Alibaba] }
+
+  # Financials
+  - { symbol: JPM, names: [JPMorgan, JP Morgan, J.P. Morgan] }
+  - { symbol: BAC, names: [Bank of America] }
+  - { symbol: GS, names: [Goldman Sachs], ambiguous_names: [Goldman] }
+  - { symbol: WFC, names: [Wells Fargo] }
+  - { symbol: V, ambiguous_names: [Visa] }
+  - { symbol: MA, names: [Mastercard] }
+  - { symbol: BRK.B, names: [Berkshire Hathaway, Berkshire], aliases: [BRK.A] }
+
+  # Energy
+  - { symbol: XOM, names: [ExxonMobil, Exxon] }
+  - { symbol: CVX, names: [Chevron] }
+  - { symbol: SHEL, ambiguous_names: [Shell] }
+  - { symbol: OXY, names: [Occidental Petroleum], ambiguous_names: [Occidental] }
+
+  # Health
+  - { symbol: UNH, names: [UnitedHealth, UnitedHealthcare] }
+  - { symbol: PFE, names: [Pfizer] }
+  - { symbol: MRNA, names: [Moderna] }
+  - { symbol: LLY, names: [Eli Lilly], ambiguous_names: [Lilly] }
+  - { symbol: NVO, names: [Novo Nordisk] }
+  - { symbol: JNJ, names: [Johnson & Johnson] }
+
+  # Telecom / media / politics-adjacent
+  - { symbol: T, names: ["AT&T"] }
+  - { symbol: VZ, names: [Verizon] }
+  - { symbol: DJT, names: [Trump Media], ambiguous_names: [Truth Social] }

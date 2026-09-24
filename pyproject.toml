@@ -1,0 +1,54 @@
+[project]
+name = "influence-tracker"
+version = "0.1.0"
+description = "Tracks stock posts by influencers, politicians and Reddit crowds, and measures how each post moved the stock."
+readme = "README.md"
+requires-python = ">=3.11,<3.12"
+license = { text = "MIT" }
+authors = [{ name = "Bryce Chomik", email = "brycechomik@gmail.com" }]
+
+dependencies = [
+    "httpx>=0.27",
+    "feedparser>=6.0",
+    # 1.5.2 fixed a break with curl_cffi 0.16+.
+    "yfinance>=1.5.2",
+    "exchange_calendars>=4.5",
+    # zoneinfo has no system tz database on Windows.
+    "tzdata>=2024.1",
+    "pandas>=2.2",
+    "numpy>=1.26,<3",
+    "pydantic>=2.7,<3",
+    "pyyaml>=6.0",
+    "rich>=13.7",
+    "python-dotenv>=1.0",
+]
+
+[project.scripts]
+influence = "influence_tracker.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.2",
+    "ruff>=0.5",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/influence_tracker"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "live: hits real network services; run explicitly with -m live",
+]
+addopts = "-m 'not live'"
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]

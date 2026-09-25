@@ -54,6 +54,11 @@ prices:
   backfill_days: 29
   request_pause_s: 1.0
 
+sentiment:
+  # Trained on financial tweets; labels each post bullish / bearish / neutral.
+  model_id: StephanAkkerman/FinTwitBERT-sentiment
+  batch_size: 16
+
 # Uppercase words that are also tickers but usually mean something else. Bare (no $)
 # ticker matching only runs on Reddit, and skips these.
 # RTX: on Reddit usually Nvidia's GPU line ("RTX 5090"). CRM: the software category ("buying a CRM").

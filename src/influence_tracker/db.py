@@ -124,6 +124,75 @@ CREATE TABLE IF NOT EXISTS runs (
     error TEXT
 );
 CREATE INDEX IF NOT EXISTS runs_stage ON runs (stage, started_at);
+
+-- Re-downloaded whole per symbol on every enrich run and replaced, never merged, so a split or dividend
+-- adjustment can't leave old and new price scales side by side.
+CREATE TABLE IF NOT EXISTS bars_1d (
+    symbol TEXT NOT NULL,
+    session_date TEXT NOT NULL,   -- YYYY-MM-DD (exchange date)
+    open REAL, high REAL, low REAL,
+    close REAL,                   -- split-adjusted close
+    adj_close REAL,               -- split- and dividend-adjusted close; use this for returns
+    volume REAL,
+    split_ratio REAL NOT NULL DEFAULT 0,   -- yfinance "Stock Splits"; 0 = no split that day
+    fetched_at TEXT NOT NULL,
+    PRIMARY KEY (symbol, session_date)
+) WITHOUT ROWID;
+
+CREATE TABLE IF NOT EXISTS earnings (
+    symbol TEXT NOT NULL,
+    earnings_at TEXT NOT NULL,    -- UTC ISO
+    PRIMARY KEY (symbol, earnings_at)
+);
+
+CREATE TABLE IF NOT EXISTS earnings_fetch (
+    symbol TEXT PRIMARY KEY,
+    fetched_at TEXT NOT NULL,
+    ok INTEGER NOT NULL,
+    error TEXT
+);
+
+-- One row per (post, ticker) mention of a non-benchmark ticker.
+CREATE TABLE IF NOT EXISTS events (
+    id INTEGER PRIMARY KEY,
+    platform TEXT NOT NULL,
+    native_id TEXT NOT NULL,
+    ticker TEXT NOT NULL,
+    t0 TEXT NOT NULL,             -- post time, UTC ISO
+    d0 TEXT NOT NULL,             -- event session: the first session whose regular close is after t0
+    session_phase TEXT NOT NULL,  -- pre | regular | after | closed
+    status TEXT NOT NULL DEFAULT 'pending',   -- pending | complete
+    intraday_state TEXT,          -- ok | unavailable; NULL while pending
+    ref_ts INTEGER,               -- start (epoch s) of the 1m bar whose close is the reference price
+    ref_price REAL,
+    earnings_flag INTEGER,        -- 1 / 0 / NULL = unknown; set when the event completes
+    split_flag INTEGER,           -- set when the event completes
+    clustered INTEGER NOT NULL DEFAULT 0,     -- not the first post about this ticker in session d0
+    spans_open INTEGER NOT NULL DEFAULT 0,    -- first-minute regular post: windows include the opening auction
+    created_at TEXT NOT NULL,
+    completed_at TEXT,
+    UNIQUE (platform, native_id, ticker)
+);
+CREATE INDEX IF NOT EXISTS events_ticker_d0 ON events (ticker, d0);
+CREATE INDEX IF NOT EXISTS events_status ON events (status);
+
+-- Raw (not market-adjusted) returns for each event window, for the ticker and for SPY over the same instants.
+-- win: pre_leg | post_leg (day-0 legs, every event with 1m data), pre60 | p5 | p15 | p30 | p60 (regular-session
+-- posts only).
+CREATE TABLE IF NOT EXISTS event_windows (
+    event_id INTEGER NOT NULL,
+    win TEXT NOT NULL,
+    start_ts INTEGER NOT NULL,    -- start (epoch s) of the bar whose close is the window's start price
+    end_ts INTEGER NOT NULL,      -- start (epoch s) of the bar whose close is the window's end price
+    start_price REAL NOT NULL,
+    end_price REAL NOT NULL,
+    ret REAL NOT NULL,
+    spy_start_price REAL,
+    spy_end_price REAL,
+    spy_ret REAL,
+    truncated INTEGER NOT NULL DEFAULT 0,     -- clipped at the session open or close
+    PRIMARY KEY (event_id, win)
+);
 """
 
 

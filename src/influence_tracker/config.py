@@ -75,12 +75,18 @@ class PricesConfig(BaseModel):
     request_pause_s: float = Field(default=1.0, ge=0.0)
 
 
+class SentimentConfig(BaseModel):
+    model_id: str = "StephanAkkerman/FinTwitBERT-sentiment"
+    batch_size: int = Field(default=16, ge=1, le=128)
+
+
 class Watchlist(BaseModel):
     x: XConfig
     truthsocial: TruthSocialConfig
     reddit: RedditConfig
     apewisdom: ApeWisdomConfig = Field(default_factory=ApeWisdomConfig)
     prices: PricesConfig = Field(default_factory=PricesConfig)
+    sentiment: SentimentConfig = Field(default_factory=SentimentConfig)
     bare_ticker_stoplist: list[str] = Field(default_factory=list)
     tickers: list[Ticker]
 

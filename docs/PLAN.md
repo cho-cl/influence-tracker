@@ -508,3 +508,34 @@ Facts found while building. Where they contradict a section above, this section 
   - Extended-hours volume is mostly 0, so M2/M3 should not build volume metrics on extended-hours bars.
 - **Schedule: 8:30 PM local** (this machine is on US Eastern time). Extended hours end at 8 PM ET, so a
   6:30 PM run would only save the day's bars the next day. The trigger follows local time across DST.
+
+## As built — M2 notes (2026-09-25)
+
+- **"Regular close" means the last 1-minute bar before the close**: the 15:59 bar, or 12:59 on early-close
+  days. It is not Yahoo's official daily close. The closing auction lands inside the 16:00 bar and can't be
+  recovered from 1-minute data, so the two differ by a few basis points. The day-0 legs chain consistently.
+  When hand-checking, compare against the 15:59 1-minute bar. M3 must not mix `bars_1d` closes and 1-minute
+  legs inside one return.
+- **Pending events have no reference price or windows yet.** They are computed at completion, which needs
+  daily bars through d0+5.
+- **Earnings.**
+  - Yahoo's earnings calendar (yfinance scrapes it) returns about 25 dates per symbol.
+  - A report maps to the first session whose close is after it, so an after-close report maps to the next
+    session.
+  - `earnings_flag` is NULL (unknown) when the latest fetch failed, or when the stored dates don't reach back
+    before the event.
+- **Daily bars** are re-downloaded each enrich for every ticker with an event, plus SPY, from the earliest d0
+  minus 150 sessions. That's one request per ticker: 22 today, more as the ticker count grows.
+- **Sentiment.**
+  - The FinTwitBERT tokenizer is uncased, so all-caps text needs no special handling (measured).
+  - The tokenizer reports `model_max_length = 1e30`, so `max_length=512` is passed explicitly; long Reddit
+    posts crashed without it.
+  - Performance: roughly 0.4–0.6 s per post on CPU, about 1 GB peak memory.
+  - The model is a one-time 420 MB download into `~/.cache/huggingface`.
+  - Only posts that mention a non-benchmark watchlist ticker are classified.
+- **`influence events`** has table, `--id` detail and `--csv` views. The CSV is written as utf-8-sig, guards
+  post text against Excel formula injection, and exports native ids as text so Excel doesn't round them.
+- **Independent check (2026-09-25).** 8 completed events were recomputed with separate code from a fresh
+  Yahoo 1-minute download, across after-hours, weekend, Labor Day and regular-session posts with truncated
+  windows. The check covered d0, phase, reference bar and price, legs, and all windows for the ticker and SPY.
+  Result: 0 mismatches.

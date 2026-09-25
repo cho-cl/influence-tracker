@@ -5,11 +5,12 @@ import logging
 import sqlite3
 from datetime import UTC, date, datetime, timedelta
 
+import pandas as pd
 from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
-from . import db
+from . import db, market
 from .config import Watchlist
 from .logsetup import make_console
 from .timeutil import NY, from_iso, to_iso
@@ -17,7 +18,18 @@ from .timeutil import NY, from_iso, to_iso
 log = logging.getLogger(__name__)
 
 PLATFORMS = ("x", "truthsocial", "reddit")
-KNOWN_STAGES = ("collect:truthsocial", "collect:reddit", "collect:apewisdom", "collect:x", "snapshot")
+KNOWN_STAGES = (
+    "collect:truthsocial",
+    "collect:reddit",
+    "collect:apewisdom",
+    "collect:x",
+    "snapshot",
+    "classify",
+    "enrich",
+)
+STANCES = ("bullish", "bearish", "neutral")
+# Events complete once daily bars reach d0+5; still pending two evening runs after that means something is stuck.
+PENDING_STALE_SESSIONS = 7
 TS_RATE_LIMIT_STAGES = ("collect:truthsocial", "backfill:truthsocial")
 TOP_N = 15
 _STATUS_STYLE = {"ok": "green", "partial": "yellow", "error": "bold red", "skipped": "dim", "running?": "yellow"}
@@ -54,11 +66,15 @@ def show_status(conn: sqlite3.Connection, watchlist: Watchlist, now: datetime, c
     console.rule(f"influence status  {_local(now)}")
     _runs(console, conn, now)
     _posts(console, conn, now)
+    _stances(console, conn, watchlist)
+    _events(console, conn, now)
     _top_tickers(console, conn)
     _accounts(console, conn, watchlist, now)
     _x_spend(console, conn, watchlist, now)
     _truthsocial_rate_limits(console, conn, now)
     _bars(console, conn, watchlist)
+    _daily_bars(console, conn, now)
+    _earnings(console, conn, now)
     _unknown_cashtags(console, conn, watchlist)
 
 
@@ -122,6 +138,10 @@ def _clip(text: str | None, limit: int) -> str:
         return ""
     text = " ".join(text.split())
     return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
+def _plural(n: int, noun: str) -> str:
+    return f"{n} {noun}{'' if n == 1 else 's'}"
 
 
 def _money(value: object) -> str:
@@ -207,6 +227,79 @@ def _posts(console: Console, conn: sqlite3.Connection, now: datetime) -> None:
         _say(console, f"ApeWisdom: {ape['n']} ticker rows over {ape['days']} days, latest snapshot {ape['latest']}")
     else:
         _say(console, "ApeWisdom: no snapshots yet")
+
+
+def _stances(console: Console, conn: sqlite3.Connection, watchlist: Watchlist) -> None:
+    # classify labels exactly these posts: the ones that mention a non-benchmark ticker.
+    symbols = [t.symbol for t in watchlist.event_tickers]
+    rows = (
+        conn.execute(
+            f"""SELECT p.stance, p.stance_model, COUNT(*) AS n FROM posts p
+                WHERE EXISTS (SELECT 1 FROM mentions m WHERE m.platform = p.platform AND m.native_id = p.native_id
+                              AND m.ticker IN ({",".join("?" * len(symbols))}))
+                GROUP BY p.stance, p.stance_model""",
+            symbols,
+        ).fetchall()
+        if symbols
+        else []
+    )
+    total = sum(r["n"] for r in rows)
+    if not total:
+        _heading(console, "Stance: no posts mention a watchlist stock yet")
+        return
+    by_stance: dict[str, int] = {}
+    other_model = 0
+    for r in rows:
+        key = r["stance"] or "unlabelled"
+        by_stance[key] = by_stance.get(key, 0) + r["n"]
+        if r["stance"] and r["stance_model"] != watchlist.sentiment.model_id:
+            other_model += r["n"]
+    known = (*STANCES, "unlabelled")
+    parts = [f"{by_stance.get(s, 0)} {s}" for s in known]
+    parts += [f"{n} {s}" for s, n in sorted(by_stance.items()) if s not in known]
+    _heading(console, f"Stance of the {_plural(total, 'post')} that mention a watchlist stock: {', '.join(parts)}")
+    if other_model:
+        _say(
+            console,
+            f"{other_model} labelled by a model other than {watchlist.sentiment.model_id}; the next classify run "
+            "relabels them",
+            "yellow",
+        )
+
+
+def _sessions_old(d0: date, now: datetime) -> int:
+    """Sessions after d0 whose regular close is at or before now."""
+    later = market.sessions_in_range(d0 + timedelta(days=1), now.astimezone(NY).date())
+    if later and market.xnys().session_close(pd.Timestamp(later[-1])) > now:
+        later.pop()
+    return len(later)
+
+
+def _events(console: Console, conn: sqlite3.Connection, now: datetime) -> None:
+    r = conn.execute(
+        """SELECT COUNT(*) AS total, COALESCE(SUM(status = 'pending'), 0) AS pending,
+                  COALESCE(SUM(status = 'complete'), 0) AS complete,
+                  COALESCE(SUM(intraday_state = 'unavailable'), 0) AS unavailable,
+                  MIN(CASE WHEN status = 'pending' THEN d0 END) AS oldest_pending
+           FROM events"""
+    ).fetchone()
+    if not r["total"]:
+        _heading(console, "Events: none yet ('influence enrich' builds them from tagged posts)")
+        return
+    _heading(
+        console,
+        f"Events: {r['total']} ({r['complete']} complete, {r['pending']} pending), "
+        f"intraday data unavailable for {r['unavailable']}",
+    )
+    if r["oldest_pending"]:
+        d0 = date.fromisoformat(r["oldest_pending"])
+        age = _sessions_old(d0, now)
+        line = f"oldest pending event: d0 {d0} ({d0:%a}), {_plural(age, 'session')} old"
+        if age >= PENDING_STALE_SESSIONS:
+            _say(console, f"{line}; events complete once daily bars reach d0+5, so check the enrich runs", "yellow")
+        else:
+            _say(console, line)
+    _say(console, "'influence events' lists them for checking against price charts.", "dim")
 
 
 def _top_tickers(console: Console, conn: sqlite3.Connection) -> None:
@@ -360,6 +453,47 @@ def _bars(console: Console, conn: sqlite3.Connection, watchlist: Watchlist) -> N
             _say(console, f"behind the latest session: {', '.join(behind)}", "yellow")
     if missing:
         _say(console, f"no bars: {', '.join(missing)}", "yellow")
+
+
+def _daily_bars(console: Console, conn: sqlite3.Connection, now: datetime) -> None:
+    r = conn.execute("SELECT COUNT(DISTINCT symbol) AS symbols, MAX(session_date) AS latest FROM bars_1d").fetchone()
+    if r["symbols"]:
+        _heading(console, f"Daily bars: {_plural(r['symbols'], 'symbol')}, latest session {r['latest']}")
+    else:
+        _heading(console, "Daily bars: none yet")
+    run = conn.execute("SELECT * FROM runs WHERE stage = 'enrich' ORDER BY started_at DESC, id DESC LIMIT 1").fetchone()
+    if run is None:
+        return
+    when = _when(run["started_at"], now)
+    daily = (json.loads(run["counts_json"]) if run["counts_json"] else {}).get("daily")
+    failed = daily.get("symbols_failed") if isinstance(daily, dict) else None
+    if not isinstance(failed, list):
+        state = run["status"] or "still running?"
+        _say(console, f"the last enrich run, {when}, has no daily-bar result (status: {state})", "yellow")
+    elif failed:
+        _say(console, f"failed in the last enrich run, {when}: {', '.join(str(s) for s in failed)}", "yellow")
+    else:
+        _say(console, f"no symbol failed in the last enrich run, {when}")
+
+
+def _earnings(console: Console, conn: sqlite3.Connection, now: datetime) -> None:
+    rows = conn.execute("SELECT symbol, fetched_at, ok, error FROM earnings_fetch ORDER BY symbol").fetchall()
+    if not rows:
+        _heading(console, "Earnings dates: no lookups yet")
+        return
+    failed = [r for r in rows if not r["ok"]]
+    dates = conn.execute("SELECT COUNT(*) FROM earnings").fetchone()[0]
+    _heading(
+        console,
+        f"Earnings dates: {_plural(len(rows) - len(failed), 'symbol')} fetched ok, {len(failed)} failed "
+        f"({_plural(dates, 'date')} stored)",
+    )
+    if failed:
+        table = _table("symbol", "last try", "error")
+        for r in failed:
+            _row(table, r["symbol"], _when(r["fetched_at"], now), _clip(r["error"], 100))
+        console.print(table)
+        _say(console, "Until a lookup works, events on these tickers can complete with the earnings flag unknown (?).")
 
 
 def _unknown_cashtags(console: Console, conn: sqlite3.Connection, watchlist: Watchlist) -> None:

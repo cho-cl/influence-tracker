@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import csv
 import io
 import logging
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 import types
@@ -89,6 +91,8 @@ def fakes(monkeypatch) -> Recorder:
     )
     _install(monkeypatch, "influence_tracker.prices", snapshot_1m=rec.fake("snapshot"))
     _install(monkeypatch, "influence_tracker.mentions", MentionMatcher=FakeMatcher)
+    _install(monkeypatch, "influence_tracker.sentiment", classify_posts=rec.fake("classify"))
+    _install(monkeypatch, "influence_tracker.events", enrich_events=rec.fake("enrich"))
     return rec
 
 
@@ -175,13 +179,15 @@ def test_a_raising_stage_does_not_stop_later_stages(root, fakes):
 
     assert cli.main(["daily"]) == 1
 
-    assert fakes.order == ["truthsocial", "reddit", "apewisdom", "snapshot"]
+    assert fakes.order == ["truthsocial", "reddit", "apewisdom", "snapshot", "classify", "enrich"]
     assert _runs(root) == [
         ("collect:truthsocial", "partial", "429 twice; giving up"),
         ("collect:reddit", "error", "RuntimeError: feed exploded"),
         ("collect:apewisdom", "ok", None),
         ("collect:x", "skipped", "X_BEARER_TOKEN not set in .env"),
         ("snapshot", "ok", None),
+        ("classify", "ok", None),
+        ("enrich", "ok", None),
     ]
     log_text = (root / "logs" / "influence.log").read_text(encoding="utf-8")
     assert "Traceback" in log_text and "feed exploded" in log_text
@@ -259,26 +265,64 @@ def test_help_exits_0(capsys):
     assert "backfill" in capsys.readouterr().out
 
 
-def test_daily_runs_snapshot_after_collect(root, fakes, fixed_now):
+def test_daily_runs_collect_snapshot_classify_enrich_in_order(root, fakes, fixed_now, watchlist):
     assert cli.main(["daily"]) == 0
 
-    assert fakes.order == ["truthsocial", "reddit", "apewisdom", "snapshot"]
+    assert fakes.order == ["truthsocial", "reddit", "apewisdom", "snapshot", "classify", "enrich"]
     assert [stage for stage, _, _ in _runs(root)] == [
         "collect:truthsocial",
         "collect:reddit",
         "collect:apewisdom",
         "collect:x",
         "snapshot",
+        "classify",
+        "enrich",
     ]
-    _, _, run_id, now = fakes.args("snapshot")
-    assert run_id == 5
-    assert now == fixed_now
+    for stage, expected_run_id in (("snapshot", 5), ("classify", 6), ("enrich", 7)):
+        conn_arg, watchlist_arg, run_id, now = fakes.args(stage)
+        assert isinstance(conn_arg, sqlite3.Connection)
+        assert watchlist_arg == watchlist
+        assert (run_id, now) == (expected_run_id, fixed_now)
 
 
-def test_snapshot_alone(root, fakes):
-    assert cli.main(["snapshot"]) == 0
-    assert fakes.order == ["snapshot"]
-    assert _runs(root) == [("snapshot", "ok", None)]
+@pytest.mark.parametrize("stage", ["snapshot", "classify", "enrich"])
+def test_a_stage_alone(root, fakes, stage):
+    assert cli.main([stage]) == 0
+    assert fakes.order == [stage]
+    assert _runs(root) == [(stage, "ok", None)]
+
+
+def test_enrich_still_runs_when_classify_raises(root, fakes):
+    fakes.outcomes["classify"] = MemoryError("model does not fit")
+    fakes.outcomes["enrich"] = {"status": "partial", "completed": 3, "failed_events": [7]}
+
+    assert cli.main(["daily"]) == 1
+
+    assert fakes.order[-2:] == ["classify", "enrich"]
+    assert _runs(root)[-2:] == [
+        ("classify", "error", "MemoryError: model does not fit"),
+        ("enrich", "partial", None),
+    ]
+
+
+def test_a_partial_enrich_does_not_fail_the_run(root, fakes):
+    fakes.outcomes["enrich"] = {"status": "partial", "daily": {"status": "partial", "symbols_failed": ["NVDA"]}}
+
+    assert cli.main(["enrich"]) == 0
+
+    [(counts_json,)] = _query(root, "SELECT counts_json FROM runs")
+    assert '"symbols_failed": ["NVDA"]' in counts_json
+
+
+def test_missing_sentiment_module_fails_only_classify(root, fakes, monkeypatch):
+    monkeypatch.setitem(sys.modules, "influence_tracker.sentiment", None)
+
+    assert cli.main(["daily"]) == 1
+
+    assert fakes.order[-2:] == ["snapshot", "enrich"]
+    runs = _runs(root)
+    assert [(s, st) for s, st, _ in runs[-3:]] == [("snapshot", "ok"), ("classify", "error"), ("enrich", "ok")]
+    assert runs[-2][2].startswith("ModuleNotFoundError")
 
 
 def test_missing_collector_module_fails_only_its_stage(root, fakes, monkeypatch):
@@ -286,7 +330,7 @@ def test_missing_collector_module_fails_only_its_stage(root, fakes, monkeypatch)
 
     assert cli.main(["daily"]) == 1
 
-    assert fakes.order == ["truthsocial", "apewisdom", "snapshot"]
+    assert fakes.order == ["truthsocial", "apewisdom", "snapshot", "classify", "enrich"]
     stage, state, error = _runs(root)[1]
     assert (stage, state) == ("collect:reddit", "error")
     assert error.startswith("ModuleNotFoundError")
@@ -300,7 +344,7 @@ def test_collect_setup_failure_fails_post_stages_but_not_apewisdom_or_snapshot(r
 
     assert cli.main(["daily"]) == 1
 
-    assert fakes.order == ["apewisdom", "snapshot"]
+    assert fakes.order == ["apewisdom", "snapshot", "classify", "enrich"]
     runs = _runs(root)
     assert [(s, st) for s, st, _ in runs] == [
         ("collect:truthsocial", "error"),
@@ -308,6 +352,8 @@ def test_collect_setup_failure_fails_post_stages_but_not_apewisdom_or_snapshot(r
         ("collect:apewisdom", "ok"),
         ("collect:x", "skipped"),
         ("snapshot", "ok"),
+        ("classify", "ok"),
+        ("enrich", "ok"),
     ]
     assert "collect setup failed" in runs[0][2] and "bad regex" in runs[0][2]
 
@@ -372,6 +418,94 @@ def test_backfill_rejects_bad_arguments(root, fakes, argv):
     assert fakes.order == []
 
 
+# ---------------------------------------------------------------- events
+
+
+def _insert_event(conn: sqlite3.Connection) -> int:
+    """One complete TSLA event posted Thu 2026-09-24 10:31:07 New York time, with its +15 minute window."""
+    ref = int(datetime(2026, 9, 24, 14, 30, tzinfo=UTC).timestamp())
+    with conn:
+        conn.execute(
+            """INSERT INTO posts (platform, native_id, author, created_at_utc, text, url, stance, stance_conf,
+                                  stance_model, collected_at)
+               VALUES ('x', '1001', 'elonmusk', '2026-09-24T14:31:07Z', 'Buying $TSLA 🚀 [/x]',
+                       'https://x.com/elonmusk/status/1001', 'bullish', 0.87, 'm', '2026-09-24T22:30:00Z')"""
+        )
+        cur = conn.execute(
+            """INSERT INTO events (platform, native_id, ticker, t0, d0, session_phase, status, intraday_state,
+                                   ref_ts, ref_price, earnings_flag, split_flag, created_at, completed_at)
+               VALUES ('x', '1001', 'TSLA', '2026-09-24T14:31:07Z', '2026-09-24', 'regular', 'complete', 'ok',
+                       ?, 182.41, 0, 0, '2026-09-24T22:30:00Z', '2026-10-01T22:30:00Z')""",
+            (ref,),
+        )
+        event_id = int(cur.lastrowid)
+        conn.execute(
+            """INSERT INTO event_windows (event_id, win, start_ts, end_ts, start_price, end_price, ret,
+                                          spy_start_price, spy_end_price, spy_ret, truncated)
+               VALUES (?, 'p15', ?, ?, 182.41, 183.0, 0.003234, 661.0, 660.67, -0.0005, 0)""",
+            (event_id, ref, ref + 15 * 60),
+        )
+    return event_id
+
+
+def test_events_on_an_empty_database(root, capsys):
+    assert cli.main(["events"]) == 0
+    assert "No events yet" in capsys.readouterr().out
+
+
+def test_events_lists_shows_one_and_exports(root, capsys, tmp_path):
+    conn = db.connect(root / "data" / "tracker.db")
+    try:
+        event_id = _insert_event(conn)
+    finally:
+        conn.close()
+
+    assert cli.main(["events", "--ticker", "tsla", "--status", "complete", "--platform", "x"]) == 0
+    out = capsys.readouterr().out
+    assert "1 of 1 (ticker=TSLA, platform=x, status=complete)" in out
+    assert "Sep 24 10:31:07 ET" in out and "182.41 @10:30" in out and "+0.32%" in out and "-0.05%" in out
+    assert "Buying $TSLA 🚀 [/x]" in out
+    assert "hidden to fit" not in out, "redirected output is not squeezed to a terminal width"
+
+    assert cli.main(["events", "--ticker", "NVDA"]) == 0
+    assert "No events match ticker=NVDA." in capsys.readouterr().out
+
+    assert cli.main(["events", "--id", str(event_id)]) == 0
+    out = " ".join(capsys.readouterr().out.split())
+    assert "read the close of the 10:30 ET bar; it should be 182.41" in out
+    assert "https://x.com/elonmusk/status/1001" in out
+
+    assert cli.main(["events", "--id", "999"]) == 1
+    assert "no event with id 999" in capsys.readouterr().err
+
+    path = tmp_path / "out" / "events.csv"
+    assert cli.main(["events", "--csv", str(path)]) == 0
+    assert f"wrote 1 event to {path.resolve()}" in capsys.readouterr().out
+    with open(path, encoding="utf-8-sig", newline="") as f:
+        [row] = list(csv.DictReader(f))
+    assert (row["ticker"], row["p15_ret"], row["text"]) == ("TSLA", "0.003234", "Buying $TSLA 🚀 [/x]")
+
+
+def test_events_csv_that_cannot_be_written_exits_1(root, capsys, tmp_path):
+    assert cli.main(["events", "--csv", str(tmp_path)]) == 1
+    assert f"cannot write {tmp_path}" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["events", "--status", "open"],
+        ["events", "--platform", "facebook"],
+        ["events", "--limit", "0"],
+        ["events", "--limit", "ten"],
+        ["events", "--id", "x"],
+        ["events", "--id", "1", "--csv", "events.csv"],
+    ],
+)
+def test_events_rejects_bad_arguments(root, argv):
+    assert cli.main(argv) == 2
+
+
 # ---------------------------------------------------------------- config errors
 
 
@@ -417,8 +551,15 @@ def test_status_works_on_an_empty_database(root, capsys, watchlist):
 
     out = capsys.readouterr().out
     empty = ("never", "no X usage yet", "no mentions yet", "no unknown cashtags yet", "no snapshots yet")
-    for phrase in (*empty, f"0 of {len(watchlist.tickers)} symbols"):
+    m2 = (
+        "Stance: no posts mention a watchlist stock yet",
+        "Events: none yet",
+        "Daily bars: none yet",
+        "Earnings dates: no lookups yet",
+    )
+    for phrase in (*empty, *m2, f"0 of {len(watchlist.tickers)} symbols"):
         assert phrase in out
+    assert re.search(r"^classify\W+never", out, re.MULTILINE) and re.search(r"^enrich\W+never", out, re.MULTILINE)
     assert _query(root, "SELECT COUNT(*) FROM runs") == [(0,)]
 
 
@@ -504,6 +645,110 @@ def test_status_reports_the_database_contents(conn, watchlist, fixed_now, fakes)
     # unknown cashtags, most posts first
     unknown = out[out.index("Unknown cashtags") :]
     assert unknown.index("ZZZZ") < unknown.index("QQQQ")
+
+
+def _tagged_post(conn, native_id, tickers, stance=None, model=None) -> None:
+    post = _post("truthsocial", native_id, "text", datetime(2026, 9, 24, 14, tzinfo=UTC))
+    db.upsert_post(conn, post, post.created_at_utc)
+    db.replace_mentions(
+        conn, "truthsocial", native_id, [Mention(t, "name", t) for t in tickers], [], post.created_at_utc
+    )
+    if stance:
+        conn.execute(
+            "UPDATE posts SET stance = ?, stance_conf = 0.9, stance_model = ? WHERE native_id = ?",
+            (stance, model, native_id),
+        )
+
+
+def _status_event(conn, native_id, d0, status, intraday_state=None) -> None:
+    conn.execute(
+        """INSERT INTO events (platform, native_id, ticker, t0, d0, session_phase, status, intraday_state, created_at)
+           VALUES ('truthsocial', ?, 'INTC', ?, ?, 'regular', ?, ?, '2026-09-24T22:30:00Z')""",
+        (native_id, f"{d0}T15:00:00Z", d0, status, intraday_state),
+    )
+
+
+def test_status_reports_stances_events_daily_bars_and_earnings(conn, watchlist, fixed_now):
+    model = watchlist.sentiment.model_id
+    with conn:
+        _tagged_post(conn, "p1", ["INTC"], "bullish", model)
+        _tagged_post(conn, "p2", ["TSLA", "SPY"], "bearish", "an/older-model")
+        _tagged_post(conn, "p3", ["NVDA"])
+        # Benchmark-only posts never become events, so classify skips them and they are not counted.
+        _tagged_post(conn, "p4", ["SPY", "QQQ"])
+
+        _status_event(conn, "p1", "2026-09-14", "pending")
+        _status_event(conn, "p2", "2026-09-24", "pending")
+        _status_event(conn, "p3", "2026-09-10", "complete", "ok")
+        _status_event(conn, "p4", "2026-09-11", "complete", "unavailable")
+
+        conn.executemany(
+            "INSERT INTO bars_1d (symbol, session_date, close, adj_close, fetched_at) VALUES (?, ?, 1, 1, ?)",
+            [("SPY", "2026-09-23", "x"), ("SPY", "2026-09-24", "x"), ("INTC", "2026-09-24", "x")],
+        )
+        conn.executemany(
+            "INSERT INTO earnings_fetch (symbol, fetched_at, ok, error) VALUES (?, ?, ?, ?)",
+            [
+                ("INTC", "2026-09-24T22:00:00Z", 1, None),
+                ("NVDA", "2026-09-24T22:00:00Z", 0, "YFException: [/x] 404"),
+            ],
+        )
+        conn.executemany(
+            "INSERT INTO earnings (symbol, earnings_at) VALUES ('INTC', ?)",
+            [("2026-07-23T20:05:00Z",), ("2026-10-22T20:05:00Z",)],
+        )
+    old = db.start_run(conn, "enrich", fixed_now - timedelta(days=1))
+    db.finish_run(conn, old, "partial", {"status": "partial", "daily": {"symbols_failed": ["AAPL"]}}, None, fixed_now)
+    last = db.start_run(conn, "enrich", fixed_now - timedelta(minutes=30))
+    daily = {"status": "partial", "symbols_failed": ["NVDA", "TSLA"]}
+    db.finish_run(conn, last, "partial", {"status": "partial", "daily": daily}, None, fixed_now)
+
+    out = _render(conn, watchlist, fixed_now)
+
+    assert "Stance of the 3 posts that mention a watchlist stock: 1 bullish, 1 bearish, 0 neutral, 1 unlabelled" in out
+    assert f"1 labelled by a model other than {model}; the next classify run relabels them" in out
+    assert "Events: 4 (2 complete, 2 pending), intraday data unavailable for 1" in out
+    # Sep 15-18 and 21-24 have closed by Thursday 18:30 New York time.
+    assert (
+        "oldest pending event: d0 2026-09-14 (Mon), 8 sessions old; events complete once daily bars reach d0+5, "
+        "so check the enrich runs"
+    ) in out
+    assert "Daily bars: 2 symbols, latest session 2026-09-24" in out
+    assert "failed in the last enrich run, 2026-09-24 18:00 ET (30m ago): NVDA, TSLA" in out
+    assert "AAPL" not in out[out.index("Daily bars") : out.index("Earnings dates")]
+    assert "Earnings dates: 1 symbol fetched ok, 1 failed (2 dates stored)" in out
+    assert "YFException: [/x] 404" in out
+
+
+@pytest.mark.parametrize(
+    ("status_", "counts", "expected"),
+    [
+        ("ok", {"status": "ok", "daily": {"symbols_failed": []}}, "no symbol failed in the last enrich run"),
+        ("error", {}, "the last enrich run, 2026-09-24 18:30 ET (just now), has no daily-bar result (status: error)"),
+    ],
+)
+def test_status_daily_bar_failures_of_the_last_enrich_run(conn, watchlist, fixed_now, status_, counts, expected):
+    run_id = db.start_run(conn, "enrich", fixed_now)
+    db.finish_run(conn, run_id, status_, counts, None, fixed_now)
+    assert expected in _render(conn, watchlist, fixed_now)
+
+
+@pytest.mark.parametrize(
+    ("d0", "now", "expected"),
+    [
+        ("2026-09-24", datetime(2026, 9, 24, 22, 30, tzinfo=UTC), 0),
+        ("2026-09-23", datetime(2026, 9, 24, 22, 30, tzinfo=UTC), 1),
+        # 15:00 New York: Thursday's session has not closed yet.
+        ("2026-09-23", datetime(2026, 9, 24, 19, 0, tzinfo=UTC), 0),
+        # A weekend post's d0 is still ahead.
+        ("2026-09-28", datetime(2026, 9, 26, 16, 0, tzinfo=UTC), 0),
+        # Thanksgiving is skipped; the Nov 27 early close (13:00) counts once passed.
+        ("2026-11-25", datetime(2026, 11, 27, 18, 5, tzinfo=UTC), 1),
+        ("2026-11-25", datetime(2026, 11, 30, 21, 0, tzinfo=UTC), 2),
+    ],
+)
+def test_pending_age_counts_closed_sessions_after_d0(d0, now, expected):
+    assert status._sessions_old(date.fromisoformat(d0), now) == expected
 
 
 def test_status_says_no_x_usage_when_the_x_module_is_missing(conn, watchlist, fixed_now, monkeypatch):

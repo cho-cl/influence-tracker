@@ -14,10 +14,10 @@ from pathlib import Path
 import yaml
 from pydantic import ValidationError
 
-from . import db, ingest
+from . import db, eventsview, ingest
 from .config import Settings, Watchlist, load_settings, load_watchlist
 from .logsetup import force_utf8_stdio, setup_logging
-from .status import format_counts, show_status
+from .status import PLATFORMS, format_counts, show_status
 from .timeutil import NY, utc_now
 
 log = logging.getLogger(__name__)
@@ -72,6 +72,22 @@ class Pipeline:
             return snapshot_1m(self.conn, self.watchlist, run_id, now)
 
         self._stage("snapshot", run)
+
+    def classify(self) -> None:
+        def run(run_id: int, now: datetime) -> object:
+            from .sentiment import classify_posts
+
+            return classify_posts(self.conn, self.watchlist, run_id, now)
+
+        self._stage("classify", run)
+
+    def enrich(self) -> None:
+        def run(run_id: int, now: datetime) -> object:
+            from .events import enrich_events
+
+            return enrich_events(self.conn, self.watchlist, run_id, now)
+
+        self._stage("enrich", run)
 
     def backfill_truthsocial(self, since: date) -> None:
         sink, setup_error = self._prepare_sink()
@@ -198,10 +214,23 @@ def _iso_date(text: str) -> date:
         raise argparse.ArgumentTypeError(f"expected a date like 2025-01-20, got {text!r}") from None
 
 
+def _positive_int(text: str) -> int:
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected a whole number, got {text!r}") from None
+    if value < 1:
+        raise argparse.ArgumentTypeError(f"must be 1 or more, got {value}")
+    return value
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="influence",
-        description="Collect stock posts from X, Truth Social and Reddit, and snapshot 1-minute prices.",
+        description=(
+            "Collect stock posts from X, Truth Social and Reddit, snapshot 1-minute prices, label each post's "
+            "stance and turn every ticker mention into an event with its reference price and returns."
+        ),
     )
     sub = parser.add_subparsers(dest="command", required=True, metavar="COMMAND")
     collect = sub.add_parser("collect", help="fetch new posts: Truth Social, Reddit RSS, ApeWisdom, X")
@@ -213,8 +242,27 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"run only these collectors ({', '.join(COLLECTORS)})",
     )
     sub.add_parser("snapshot", help="save 1-minute bars for every watchlist ticker")
-    sub.add_parser("daily", help="collect everything, then snapshot (what the scheduled task runs)")
-    sub.add_parser("status", help="last runs, post counts, account health, X spend, price coverage")
+    sub.add_parser("classify", help="label posts that mention a watchlist stock bullish, bearish or neutral")
+    sub.add_parser("enrich", help="turn ticker mentions into events: daily bars, earnings, reference prices, returns")
+    sub.add_parser("daily", help="collect, snapshot, classify, then enrich (what the scheduled task runs)")
+    sub.add_parser("status", help="last runs, post counts, stances, events, account health, X spend, price coverage")
+    events = sub.add_parser(
+        "events",
+        help="list events to check by hand against price charts",
+        description="List events, newest post first, with their reference price and returns in New York time.",
+    )
+    events.add_argument("--ticker", metavar="SYMBOL", help="only events on this ticker")
+    events.add_argument("--platform", choices=PLATFORMS, help="only events from this platform")
+    events.add_argument("--status", choices=("pending", "complete"), help="only pending or only complete events")
+    events.add_argument(
+        "--limit",
+        type=_positive_int,
+        metavar="N",
+        help=f"the newest N events (default {eventsview.DEFAULT_LIMIT}; --csv exports every match unless given)",
+    )
+    detail = events.add_mutually_exclusive_group()
+    detail.add_argument("--id", type=int, dest="event_id", metavar="N", help="show one event in full")
+    detail.add_argument("--csv", type=Path, metavar="PATH", help="export the matching events to a CSV file for Excel")
     backfill = sub.add_parser("backfill", help="one-time, slow history backfill (resumable)")
     backfill.add_argument("source", choices=["truthsocial"])
     backfill.add_argument("--since", required=True, type=_iso_date, metavar="YYYY-MM-DD")
@@ -277,6 +325,8 @@ def _dispatch(
     if args.command == "status":
         show_status(conn, watchlist, clock())
         return 0
+    if args.command == "events":
+        return _events(args, watchlist, conn)
 
     if args.command == "backfill" and args.since > clock().astimezone(NY).date():
         print(f"--since {args.since} is in the future", file=sys.stderr)
@@ -288,9 +338,15 @@ def _dispatch(
         pipeline.collect(args.only)
     elif args.command == "snapshot":
         pipeline.snapshot()
+    elif args.command == "classify":
+        pipeline.classify()
+    elif args.command == "enrich":
+        pipeline.enrich()
     elif args.command == "daily":
         pipeline.collect()
         pipeline.snapshot()
+        pipeline.classify()
+        pipeline.enrich()
     elif args.command == "backfill":
         pipeline.backfill_truthsocial(args.since)
     else:
@@ -302,6 +358,31 @@ def _dispatch(
     summary = ", ".join(f"{n} {status}" for status, n in tally.items())
     log.info("influence %s finished: %s -> exit %d", args.command, summary, pipeline.exit_code)
     return pipeline.exit_code
+
+
+def _events(args: argparse.Namespace, watchlist: Watchlist, conn: sqlite3.Connection) -> int:
+    if args.event_id is not None:
+        if eventsview.show_event(conn, args.event_id, eventsview.events_console()):
+            return 0
+        print(f"no event with id {args.event_id}", file=sys.stderr)
+        return 1
+
+    ticker = args.ticker
+    if ticker:
+        known = watchlist.ticker(ticker)
+        ticker = known.symbol if known else ticker.upper()
+    flt = eventsview.EventFilter(ticker, args.platform, args.status)
+    if args.csv is not None:
+        try:
+            n = eventsview.export_csv(conn, args.csv, flt, args.limit)
+        except OSError as e:
+            hint = " (is it open in Excel?)" if isinstance(e, PermissionError) else ""
+            print(f"cannot write {args.csv}: {e}{hint}", file=sys.stderr)
+            return 1
+        print(f"wrote {n} event{'' if n == 1 else 's'} to {args.csv.resolve()}")
+        return 0
+    eventsview.show_events(conn, flt, args.limit or eventsview.DEFAULT_LIMIT, eventsview.events_console())
+    return 0
 
 
 if __name__ == "__main__":

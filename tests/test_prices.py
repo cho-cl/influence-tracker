@@ -10,7 +10,7 @@ from yfinance.exceptions import YFPricesMissingError, YFRateLimitError
 
 from influence_tracker import market, prices
 from influence_tracker.config import Watchlist
-from influence_tracker.timeutil import NY, utc_now
+from influence_tracker.timeutil import NY, to_iso, utc_now
 
 # 04:00, 09:30, 15:59 and 19:59 New York: the first/last extended bar and the regular open/last minute.
 SPARSE_MINUTES = (4 * 60, 9 * 60 + 30, 15 * 60 + 59, 19 * 60 + 59)
@@ -484,6 +484,315 @@ def test_run_that_stores_nothing_is_an_error(conn, watchlist, fixed_now):
     assert counts["requests"] == 1
 
 
+# ---------------------------------------------------------------- daily bars
+
+SEP_1 = date(2026, 9, 1)
+
+
+def daily_frame(sessions: list[date], base: float = 100.0, splits: dict[date, float] | None = None) -> pd.DataFrame:
+    """Shaped like yfinance 1.7.0 history(interval='1d', auto_adjust=False, actions=True), verified live."""
+    splits = splits or {}
+    index = pd.DatetimeIndex(pd.to_datetime([s.isoformat() for s in sessions])).tz_localize("America/New_York")
+    close = [base + i for i in range(len(sessions))]
+    df = pd.DataFrame(
+        {
+            "Open": [c - 0.5 for c in close],
+            "High": [c + 1 for c in close],
+            "Low": [c - 1 for c in close],
+            "Close": close,
+            "Adj Close": [c * 0.98 for c in close],
+            "Volume": [5_000_000 + i for i in range(len(sessions))],
+            "Dividends": [0.0] * len(sessions),
+            "Stock Splits": [splits.get(s, 0.0) for s in sessions],
+        },
+        index=index.as_unit("s"),
+    )
+    df.index.name = "Date"
+    return df
+
+
+class FakeDaily:
+    """Every XNYS session from start to end inclusive, today's unfinished one included, like Yahoo."""
+
+    def __init__(
+        self,
+        base: float = 100.0,
+        splits: dict[str, dict[date, float]] | None = None,
+        errors: dict[str, list[BaseException | None]] | None = None,
+        always_fail: dict[str, BaseException] | None = None,
+    ) -> None:
+        self.base = base
+        self.splits = splits or {}
+        self.errors = errors or {}
+        self.always_fail = always_fail or {}
+        self.calls: list[tuple[str, date, date]] = []
+
+    def __call__(self, symbol: str, start: date, end: date) -> pd.DataFrame:
+        self.calls.append((symbol, start, end))
+        queued = self.errors.get(symbol)
+        if queued:
+            exc = queued.pop(0)
+            if exc is not None:
+                raise exc
+        if symbol in self.always_fail:
+            raise self.always_fail[symbol]
+        return daily_frame(market.sessions_in_range(start, end), self.base, self.splits.get(symbol))
+
+
+def refresh_daily(conn, wl: Watchlist, symbols: list[str], now: datetime, fake, start: date = SEP_1, sleeps=None):
+    return prices.refresh_daily_bars(
+        conn, wl, symbols, start, run_id=1, now=now, fetch=fake, sleep=sleeps if sleeps is not None else Sleeps()
+    )
+
+
+def stored_daily(conn, symbol: str) -> dict[str, dict]:
+    rows = conn.execute("SELECT * FROM bars_1d WHERE symbol = ? ORDER BY session_date", (symbol,)).fetchall()
+    return {r["session_date"]: dict(r) for r in rows}
+
+
+def test_daily_bars_exclude_the_unfinished_session(conn, watchlist, fixed_now):
+    fake = FakeDaily()
+    counts = refresh_daily(conn, watchlist, ["SPY"], fixed_now, fake)
+
+    # 18:30 New York on Thu Sep 24: Yahoo already serves a Sep 24 bar, but that session is still trading after-hours.
+    assert fake.calls == [("SPY", SEP_1, date(2026, 9, 24))]
+    sessions = market.sessions_in_range(SEP_1, date(2026, 9, 23))
+    assert counts == {"status": "ok", "symbols": 1, "requests": 1, "rows": len(sessions), "symbols_failed": []}
+    rows = stored_daily(conn, "SPY")
+    assert list(rows) == [s.isoformat() for s in sessions]
+    first = rows["2026-09-01"]
+    assert (first["open"], first["high"], first["low"], first["close"]) == (99.5, 101.0, 99.0, 100.0)
+    assert first["adj_close"] == pytest.approx(98.0) and first["volume"] == 5_000_000.0
+    assert first["split_ratio"] == 0 and first["fetched_at"] == "2026-09-24T22:30:00Z"
+
+    refresh_daily(conn, watchlist, ["SPY"], datetime(2026, 9, 24, 20, 0, tzinfo=NY), FakeDaily())
+    assert list(stored_daily(conn, "SPY"))[-1] == "2026-09-24"
+
+
+def test_daily_refresh_replaces_the_symbols_rows_whole(conn, watchlist, fixed_now):
+    wl = subset(watchlist, ["SPY", "TSLA"])
+    refresh_daily(conn, wl, ["TSLA", "SPY"], fixed_now, FakeDaily(base=100.0))
+    spy_before = stored_daily(conn, "SPY")
+
+    # A later download starting later, with the whole history re-adjusted (e.g. after a split).
+    fake = FakeDaily(base=25.0)
+    counts = refresh_daily(conn, wl, ["TSLA"], fixed_now + timedelta(days=1), fake, start=date(2026, 9, 10))
+    assert counts["status"] == "ok"
+    rows = stored_daily(conn, "TSLA")
+    assert list(rows)[0] == "2026-09-10" and list(rows)[-1] == "2026-09-24"
+    assert rows["2026-09-10"]["close"] == 25.0
+    assert {r["fetched_at"] for r in rows.values()} == {"2026-09-25T22:30:00Z"}
+    assert stored_daily(conn, "SPY") == spy_before
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        ConnectionError("connection reset"),
+        YFPricesMissingError("TSLA", " (1d ...)"),
+        "missing-column",
+        "only-today",
+    ],
+    ids=["connection", "no-data", "missing-column", "only-today"],
+)
+def test_daily_failure_keeps_the_old_rows(conn, watchlist, fixed_now, failure, caplog):
+    wl = subset(watchlist, ["SPY", "TSLA"])
+    refresh_daily(conn, wl, ["TSLA", "SPY"], fixed_now, FakeDaily())
+    before = stored_daily(conn, "TSLA")
+
+    good = FakeDaily(base=7.0)
+
+    def fetch(symbol: str, start: date, end: date) -> pd.DataFrame:
+        if symbol != "TSLA":
+            return good(symbol, start, end)
+        if isinstance(failure, BaseException):
+            raise failure
+        if failure == "missing-column":
+            return good(symbol, start, end).drop(columns=["Stock Splits"])
+        return daily_frame([end])  # Yahoo only has the session still in progress
+
+    with caplog.at_level("WARNING", logger=prices.__name__):
+        counts = refresh_daily(conn, wl, ["TSLA", "SPY"], fixed_now + timedelta(days=1), fetch)
+    assert counts["status"] == "partial" and counts["symbols_failed"] == ["TSLA"]
+    assert stored_daily(conn, "TSLA") == before
+    assert stored_daily(conn, "SPY")["2026-09-01"]["close"] == 7.0
+    assert "TSLA: daily bars failed" in caplog.text
+
+
+def test_daily_all_failing_is_an_error(conn, watchlist, fixed_now):
+    fake = FakeDaily(always_fail={"SPY": ConnectionError("x"), "TSLA": ConnectionError("x")})
+    counts = refresh_daily(conn, subset(watchlist, ["SPY", "TSLA"]), ["SPY", "TSLA"], fixed_now, fake)
+    assert counts == {"status": "error", "symbols": 2, "requests": 2, "rows": 0, "symbols_failed": ["SPY", "TSLA"]}
+
+
+def test_daily_rows_clean_yahoo_quirks():
+    sessions = [date(2026, 9, 3), date(2026, 9, 4), date(2026, 9, 7), date(2026, 9, 8), date(2026, 9, 9)]
+    df = daily_frame(sessions, splits={date(2026, 9, 8): 4.0})
+    df.loc[df.index[1], "Close"] = math.nan  # a dividend-only row without prices
+    df["Volume"] = df["Volume"].astype(float)
+    df.loc[df.index[3], "Volume"] = math.nan
+    df.loc[df.index[4], "Stock Splits"] = math.nan
+    df = pd.concat([df, df.iloc[[0]]])  # a repeated date
+
+    rows = prices.daily_rows(df, through=date(2026, 9, 8))
+    # Sep 7 2026 is Labor Day: a row on it is not a session and is dropped; Sep 9 is after `through`
+    assert [r[0] for r in rows] == ["2026-09-03", "2026-09-08"]
+    assert rows[1][6] is None and rows[1][7] == 4.0
+    assert prices.daily_rows(df, through=date(2026, 9, 9))[-1][7] == 0.0
+    assert all(type(x) is float for x in rows[0][1:])
+
+
+def test_daily_rows_use_the_index_date_not_a_converted_one():
+    df = daily_frame([date(2026, 9, 1)])
+    df.index = df.index.tz_convert("UTC").normalize()  # Sep 1 00:00 UTC is still Aug 31 in New York
+    assert [r[0] for r in prices.daily_rows(df, through=date(2026, 9, 30))] == ["2026-09-01"]
+    naive = daily_frame([date(2026, 9, 1)])
+    naive.index = naive.index.tz_localize(None)
+    assert [r[0] for r in prices.daily_rows(naive, through=date(2026, 9, 30))] == ["2026-09-01"]
+    assert prices.daily_rows(daily_frame([]), through=date(2026, 9, 30)) == []
+
+
+def test_daily_brk_b_requested_as_brk_dash_b(conn, watchlist, fixed_now):
+    fake = FakeDaily()
+    refresh_daily(conn, watchlist, ["BRK.B", "SPY"], fixed_now, fake)
+    assert [c[0] for c in fake.calls] == ["BRK-B", "SPY"]
+    assert stored_daily(conn, "BRK.B") and not stored_daily(conn, "BRK-B")
+
+
+def test_daily_requests_are_paced_and_rate_limits_retried_once(conn, watchlist, fixed_now):
+    wl = subset(watchlist, ["SPY", "QQQ", "TSLA"], request_pause_s=2.0)
+    sleeps = Sleeps()
+    fake = FakeDaily(errors={"QQQ": [YFRateLimitError()]})
+    counts = refresh_daily(conn, wl, ["SPY", "QQQ", "TSLA", "SPY"], fixed_now, fake, sleeps=sleeps)
+    assert [c[0] for c in fake.calls] == ["SPY", "QQQ", "QQQ", "TSLA"]
+    assert sleeps == [2.0, 60.0, 2.0]
+    assert counts["status"] == "ok" and counts["symbols"] == 3 and counts["requests"] == 4
+
+
+def test_daily_persistent_rate_limit_stops_the_run(conn, watchlist, fixed_now):
+    wl = subset(watchlist, ["SPY", "QQQ", "TSLA"])
+    fake = FakeDaily(errors={"QQQ": [YFRateLimitError(), YFRateLimitError()]})
+    counts = refresh_daily(conn, wl, ["SPY", "QQQ", "TSLA"], fixed_now, fake)
+    assert [c[0] for c in fake.calls] == ["SPY", "QQQ", "QQQ"]
+    assert counts["status"] == "partial" and counts["symbols_failed"] == ["QQQ", "TSLA"]
+    assert stored_daily(conn, "SPY") and not stored_daily(conn, "TSLA")
+
+
+# ---------------------------------------------------------------- earnings dates
+
+
+class FakeEarnings:
+    def __init__(self, dates: dict[str, list[datetime] | BaseException] | None = None) -> None:
+        self.dates = dates or {}
+        self.calls: list[str] = []
+
+    def __call__(self, symbol: str) -> list[datetime]:
+        self.calls.append(symbol)
+        value = self.dates.get(symbol, [])
+        if isinstance(value, BaseException):
+            raise value
+        return list(value)
+
+
+def refresh_earnings(conn, wl: Watchlist, symbols: list[str], now: datetime, fake, sleeps=None) -> dict:
+    return prices.refresh_earnings(conn, wl, symbols, now, fetch=fake, sleep=sleeps if sleeps is not None else Sleeps())
+
+
+def stored_earnings(conn, symbol: str) -> list[str]:
+    rows = conn.execute("SELECT earnings_at FROM earnings WHERE symbol = ? ORDER BY earnings_at", (symbol,))
+    return [r["earnings_at"] for r in rows]
+
+
+def earnings_fetch(conn, symbol: str) -> dict | None:
+    row = conn.execute("SELECT * FROM earnings_fetch WHERE symbol = ?", (symbol,)).fetchone()
+    return dict(row) if row else None
+
+
+def test_earnings_first_fetch_stores_utc_times(conn, watchlist, fixed_now):
+    fake = FakeEarnings(
+        {
+            "NVDA": [
+                datetime(2026, 8, 26, 16, 20, tzinfo=NY),
+                datetime(2026, 11, 18, 21, 20, tzinfo=UTC),
+                datetime(2026, 8, 26, 20, 20, tzinfo=UTC),  # the same instant twice
+            ]
+        }
+    )
+    counts = refresh_earnings(conn, watchlist, ["NVDA"], fixed_now, fake)
+    assert counts == {"status": "ok", "symbols": 1, "due": 1, "requests": 1, "failed": []}
+    assert stored_earnings(conn, "NVDA") == ["2026-08-26T20:20:00Z", "2026-11-18T21:20:00Z"]
+    assert earnings_fetch(conn, "NVDA") == {
+        "symbol": "NVDA", "fetched_at": "2026-09-24T22:30:00Z", "ok": 1, "error": None
+    }  # fmt: skip
+
+
+def test_earnings_refetched_weekly_and_replaced(conn, watchlist, fixed_now):
+    fake = FakeEarnings({"NVDA": [datetime(2026, 8, 26, 20, 20, tzinfo=UTC)]})
+    refresh_earnings(conn, watchlist, ["NVDA"], fixed_now, fake)
+
+    for later in (timedelta(days=6), timedelta(days=6, hours=23)):
+        counts = refresh_earnings(conn, watchlist, ["NVDA"], fixed_now + later, fake)
+        assert counts["due"] == 0 and counts["requests"] == 0 and counts["status"] == "ok"
+    assert fake.calls == ["NVDA"]
+
+    # a day's scheduler drift does not skip a week: anything past 6 d 23 h counts as a week old
+    fake.dates["NVDA"] = [datetime(2026, 11, 18, 21, 20, tzinfo=UTC)]
+    refresh_earnings(conn, watchlist, ["NVDA"], fixed_now + timedelta(days=6, hours=23, seconds=1), fake)
+    assert fake.calls == ["NVDA", "NVDA"]
+    assert stored_earnings(conn, "NVDA") == ["2026-11-18T21:20:00Z"]
+
+
+def test_earnings_failure_keeps_old_dates_and_retries_after_a_day(conn, watchlist, fixed_now, caplog):
+    fake = FakeEarnings({"NVDA": [datetime(2026, 8, 26, 20, 20, tzinfo=UTC)]})
+    refresh_earnings(conn, watchlist, ["NVDA"], fixed_now, fake)
+
+    fake.dates["NVDA"] = ConnectionError("reset by peer")
+    t1 = fixed_now + timedelta(days=8)
+    with caplog.at_level("WARNING", logger=prices.__name__):
+        counts = refresh_earnings(conn, watchlist, ["NVDA"], t1, fake)
+    assert counts == {"status": "error", "symbols": 1, "due": 1, "requests": 1, "failed": ["NVDA"]}
+    assert stored_earnings(conn, "NVDA") == ["2026-08-26T20:20:00Z"]
+    fetch = earnings_fetch(conn, "NVDA")
+    assert fetch["ok"] == 0 and fetch["error"] == "ConnectionError: reset by peer"
+    assert fetch["fetched_at"] == to_iso(t1)
+    assert "NVDA: earnings dates failed" in caplog.text
+
+    assert refresh_earnings(conn, watchlist, ["NVDA"], t1 + timedelta(hours=12), fake)["due"] == 0
+    fake.dates["NVDA"] = [datetime(2026, 11, 18, 21, 20, tzinfo=UTC)]
+    counts = refresh_earnings(conn, watchlist, ["NVDA"], t1 + timedelta(days=1), fake)
+    assert counts["status"] == "ok" and stored_earnings(conn, "NVDA") == ["2026-11-18T21:20:00Z"]
+    assert earnings_fetch(conn, "NVDA")["ok"] == 1 and earnings_fetch(conn, "NVDA")["error"] is None
+
+
+def test_earnings_naive_times_are_a_failure(conn, watchlist, fixed_now):
+    fake = FakeEarnings({"NVDA": [datetime(2026, 8, 26, 16, 20)], "TSLA": [datetime(2026, 7, 22, 20, 5, tzinfo=UTC)]})
+    counts = refresh_earnings(conn, watchlist, ["NVDA", "TSLA"], fixed_now, fake)
+    assert counts["status"] == "partial" and counts["failed"] == ["NVDA"]
+    assert stored_earnings(conn, "NVDA") == [] and earnings_fetch(conn, "NVDA")["ok"] == 0
+    assert stored_earnings(conn, "TSLA") == ["2026-07-22T20:05:00Z"]
+
+
+def test_earnings_only_due_symbols_are_requested_and_paced(conn, watchlist, fixed_now):
+    wl = subset(watchlist, ["SPY", "NVDA", "TSLA", "AAPL"], request_pause_s=3.0)
+    fake = FakeEarnings()
+    refresh_earnings(conn, wl, ["NVDA"], fixed_now - timedelta(days=2), fake)
+    sleeps = Sleeps()
+    counts = refresh_earnings(conn, wl, ["NVDA", "TSLA", "AAPL", "TSLA"], fixed_now, fake, sleeps)
+    assert fake.calls == ["NVDA", "TSLA", "AAPL"]
+    assert counts == {"status": "ok", "symbols": 3, "due": 2, "requests": 2, "failed": []}
+    assert sleeps == [3.0]
+
+
+def test_earnings_persistent_rate_limit_stops_without_marking_untried_symbols(conn, watchlist, fixed_now):
+    fake = FakeEarnings({"NVDA": YFRateLimitError()})
+    sleeps = Sleeps()
+    counts = refresh_earnings(conn, watchlist, ["NVDA", "TSLA"], fixed_now, fake, sleeps)
+    assert fake.calls == ["NVDA", "NVDA"] and sleeps == [60.0]
+    assert counts["status"] == "error" and counts["failed"] == ["NVDA", "TSLA"]
+    assert earnings_fetch(conn, "NVDA")["ok"] == 0
+    assert earnings_fetch(conn, "TSLA") is None
+
+
 # ---------------------------------------------------------------- live
 
 
@@ -520,3 +829,26 @@ def test_live_range_without_bars_is_reported_without_a_yahoo_reason():
             "SPY", datetime.combine(session, time(0, 0), tzinfo=NY), datetime.combine(session, time(3, 59), tzinfo=NY)
         )
     assert info.value.yahoo_reason is None
+
+
+@pytest.mark.live
+def test_live_daily_bars_carry_the_nvda_split():
+    """One real Yahoo request: NVDA's 10-for-1 split took effect on 2024-06-10."""
+    df = prices.fetch_yahoo_daily("NVDA", date(2024, 6, 3), date(2024, 6, 14))
+    assert isinstance(df.index, pd.DatetimeIndex) and str(df.index.tz) == "America/New_York"
+    rows = prices.daily_rows(df, through=date(2024, 6, 14))
+    assert [r[0] for r in rows] == [
+        s.isoformat() for s in market.sessions_in_range(date(2024, 6, 3), date(2024, 6, 14))
+    ]
+    assert {r[0]: r[7] for r in rows if r[7]} == {"2024-06-10": 10.0}
+    # split-adjusted: the pre-split closes are near the post-split ones, not ten times higher
+    assert 100 < rows[0][4] < 130 and 100 < rows[-1][4] < 140
+
+
+@pytest.mark.live
+def test_live_earnings_dates_for_an_adr():
+    """One real Yahoo request: TSM reports quarterly; the list covers years back and the next scheduled date."""
+    dates = prices.fetch_yahoo_earnings("TSM")
+    assert len(dates) >= 12
+    assert all(d.tzinfo is UTC for d in dates) and dates == sorted(dates)
+    assert dates[0] < utc_now() - timedelta(days=730) and dates[-1] > utc_now() - timedelta(days=30)

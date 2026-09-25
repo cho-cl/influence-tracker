@@ -24,6 +24,8 @@ class Account(BaseModel):
 class Ticker(BaseModel):
     symbol: str
     names: list[str] = Field(default_factory=list)
+    # Must be capitalized ("Super Micro", not "super micro-cap"), but need no finance context.
+    cased_names: list[str] = Field(default_factory=list)
     ambiguous_names: list[str] = Field(default_factory=list)
     aliases: list[str] = Field(default_factory=list)
     benchmark: bool = False
@@ -41,8 +43,8 @@ class Ticker(BaseModel):
 class XConfig(BaseModel):
     accounts: list[Account]
     monthly_budget_usd: float = 10.0
-    cost_per_post_read_usd: float = 0.005
-    cost_per_user_read_usd: float = 0.010
+    cost_per_post_read_usd: float = Field(default=0.005, gt=0)
+    cost_per_user_read_usd: float = Field(default=0.010, gt=0)
     billing_cycle_day: int = Field(default=1, ge=1, le=28)
     max_catchup_days: int = Field(default=7, ge=1, le=7)
 

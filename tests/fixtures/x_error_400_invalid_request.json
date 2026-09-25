@@ -1,0 +1,15 @@
+{
+  "errors": [
+    {
+      "parameters": {
+        "start_time": [
+          "2026-09-10T00:00:00Z"
+        ]
+      },
+      "message": "Invalid 'start_time':'2026-09-10T00:00Z'. 'start_time' must be on or after 2026-09-17T22:30Z"
+    }
+  ],
+  "title": "Invalid Request",
+  "detail": "One or more parameters to your request was invalid.",
+  "type": "https://api.x.com/2/problems/invalid-request"
+}

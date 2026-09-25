@@ -1,0 +1,12 @@
+{
+ "errors": [
+  {
+   "error_code": "NOT_FOUND",
+   "error_message": "Record not found",
+   "error_field": null
+  }
+ ],
+ "error_message": "Record not found",
+ "error_code": "NOT_FOUND",
+ "error": "Record not found"
+}

@@ -1,0 +1,104 @@
+{
+  "data": [
+    {
+      "id": "2103208375583010817",
+      "edit_history_tweet_ids": [
+        "2103208375583010817"
+      ],
+      "author_id": "44196397",
+      "created_at": "2026-09-24T19:42:07.118Z",
+      "lang": "en",
+      "text": "Tesla Q3 deliveries preview. Production at Giga Texas and Giga Berlin is ramping faster than most people realize, and the Cybercab line is on schedule for volume production next year. Robotaxi is now live in six cities with no safety monitor. Full self-driv… https://t.co/Qm4vX9bL2k",
+      "public_metrics": {
+        "retweet_count": 4210,
+        "reply_count": 8830,
+        "like_count": 61200,
+        "quote_count": 950,
+        "bookmark_count": 3100,
+        "impression_count": 18400000
+      },
+      "note_tweet": {
+        "text": "Tesla Q3 deliveries preview. Production at Giga Texas and Giga Berlin is ramping faster than most people realize, and the Cybercab line is on schedule for volume production next year. Robotaxi is now live in six cities with no safety monitor. Full self-driving v14 is a step change. $TSLA is fundamentally an AI and robotics company. Meanwhile $NVDA keeps shipping the compute that makes all of this possible.",
+        "entities": {
+          "cashtags": [
+            {
+              "start": 283,
+              "end": 288,
+              "tag": "TSLA"
+            },
+            {
+              "start": 344,
+              "end": 349,
+              "tag": "NVDA"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "2103169050979889154",
+      "edit_history_tweet_ids": [
+        "2103169050979889154"
+      ],
+      "author_id": "14216123",
+      "created_at": "2026-09-24T17:05:51.402Z",
+      "lang": "en",
+      "text": "Apple event reaction: the iPhone cycle is real. I would own $AAPL here, not trade it.",
+      "public_metrics": {
+        "retweet_count": 31,
+        "reply_count": 212,
+        "like_count": 1180,
+        "quote_count": 14,
+        "bookmark_count": 40,
+        "impression_count": 185000
+      },
+      "entities": {
+        "cashtags": [
+          {
+            "start": 60,
+            "end": 65,
+            "tag": "AAPL"
+          }
+        ]
+      }
+    },
+    {
+      "id": "2102869126258126851",
+      "edit_history_tweet_ids": [
+        "2102869126258126851"
+      ],
+      "author_id": "2361631088",
+      "created_at": "2026-09-23T21:14:03.776Z",
+      "lang": "en",
+      "text": "Our models suggest autonomous ride-hailing is a $10 trillion opportunity. $TSLA $PLTR https://t.co/8fKq2LzR0a",
+      "public_metrics": {
+        "retweet_count": 402,
+        "reply_count": 377,
+        "like_count": 3905,
+        "quote_count": 88,
+        "bookmark_count": 610,
+        "impression_count": 912000
+      },
+      "entities": {
+        "cashtags": [
+          {
+            "start": 74,
+            "end": 79,
+            "tag": "TSLA"
+          },
+          {
+            "start": 80,
+            "end": 85,
+            "tag": "PLTR"
+          }
+        ]
+      }
+    }
+  ],
+  "meta": {
+    "newest_id": "2103208375583010817",
+    "oldest_id": "2102869126258126851",
+    "result_count": 3,
+    "next_token": "b26v89c19zqg8o3fr5sc0ex4iax8fgmfxkqbf2jwxsg9"
+  }
+}

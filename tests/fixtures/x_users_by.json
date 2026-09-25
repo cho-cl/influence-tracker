@@ -1,0 +1,100 @@
+{
+  "data": [
+    {
+      "id": "44196397",
+      "name": "Elon Musk",
+      "username": "elonmusk"
+    },
+    {
+      "id": "14216123",
+      "name": "Jim Cramer",
+      "username": "jimcramer"
+    },
+    {
+      "id": "2361631088",
+      "name": "Cathie Wood",
+      "username": "CathieDWood"
+    },
+    {
+      "id": "880412538625810432",
+      "name": "Bill Ackman",
+      "username": "BillAckman"
+    },
+    {
+      "id": "3291691",
+      "name": "Chamath Palihapitiya",
+      "username": "chamath"
+    },
+    {
+      "id": "1244369840",
+      "name": "Cassandra B.C.",
+      "username": "michaeljburry"
+    },
+    {
+      "id": "1128369600849514496",
+      "name": "Roaring Kitty",
+      "username": "TheRoaringKitty"
+    },
+    {
+      "id": "14146616",
+      "name": "Michael Saylor",
+      "username": "saylor"
+    },
+    {
+      "id": "14379660",
+      "name": "Brian Armstrong",
+      "username": "brian_armstrong"
+    },
+    {
+      "id": "1224446564",
+      "name": "Muddy Waters Research",
+      "username": "muddywatersre"
+    },
+    {
+      "id": "158373546",
+      "name": "Citron Research",
+      "username": "CitronResearch"
+    },
+    {
+      "id": "25073877",
+      "name": "Donald J. Trump",
+      "username": "realDonaldTrump"
+    },
+    {
+      "id": "822215673812119553",
+      "name": "The White House",
+      "username": "WhiteHouse"
+    },
+    {
+      "id": "1542228578",
+      "name": "JD Vance",
+      "username": "JDVance"
+    },
+    {
+      "id": "1879977131586555904",
+      "name": "Treasury Secretary Scott Bessent",
+      "username": "SecScottBessent"
+    },
+    {
+      "id": "1602050125",
+      "name": "Howard Lutnick",
+      "username": "howardlutnick"
+    },
+    {
+      "id": "6015742",
+      "name": "David Sacks",
+      "username": "DavidSacks"
+    }
+  ],
+  "errors": [
+    {
+      "value": "nosuchuser_x1",
+      "detail": "Could not find user with usernames: [nosuchuser_x1].",
+      "title": "Not Found Error",
+      "resource_type": "user",
+      "parameter": "usernames",
+      "resource_id": "nosuchuser_x1",
+      "type": "https://api.x.com/2/problems/resource-not-found"
+    }
+  ]
+}

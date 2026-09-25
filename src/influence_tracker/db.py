@@ -150,8 +150,7 @@ def init_schema(conn: sqlite3.Connection) -> None:
             )
         elif row["version"] < SCHEMA_VERSION:
             raise RuntimeError(
-                f"database schema v{row['version']} is older than this code (v{SCHEMA_VERSION}); "
-                "a migration is needed"
+                f"database schema v{row['version']} is older than this code (v{SCHEMA_VERSION}); a migration is needed"
             )
 
 
@@ -167,12 +166,10 @@ def upsert_account(conn: sqlite3.Connection, platform: str, handle: str, categor
 
 
 def deactivate_missing_accounts(conn: sqlite3.Connection, platform: str, handles: Iterable[str]) -> None:
-    keep = {h.lower() for h in handles}
+    keep = set(handles)
     for row in conn.execute("SELECT handle FROM accounts WHERE platform = ?", (platform,)).fetchall():
-        if row["handle"].lower() not in keep:
-            conn.execute(
-                "UPDATE accounts SET active = 0 WHERE platform = ? AND handle = ?", (platform, row["handle"])
-            )
+        if row["handle"] not in keep:
+            conn.execute("UPDATE accounts SET active = 0 WHERE platform = ? AND handle = ?", (platform, row["handle"]))
 
 
 def set_account_resolution(

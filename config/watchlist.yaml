@@ -56,10 +56,13 @@ prices:
 
 # Uppercase words that are also tickers but usually mean something else. Bare (no $)
 # ticker matching only runs on Reddit, and skips these.
-bare_ticker_stoplist: [CAT, ARM, COST, SHOP, SPOT, SNAP, HOOD, COIN, MAT, PEP, XYZ, DIS]
+# RTX: on Reddit usually Nvidia's GPU line ("RTX 5090"); Raytheon still matches via $RTX and its name.
+bare_ticker_stoplist: [CAT, ARM, COST, SHOP, SPOT, SNAP, HOOD, COIN, MAT, PEP, XYZ, DIS, RTX]
 
 # names:            matched case-insensitively on word boundaries.
+# cased_names:      must be capitalized, no finance word needed ("Super Micro" but not "super micro-cap").
 # ambiguous_names:  must be capitalized AND appear with a finance word (stock, shares, buy, ...).
+#                   On X these are only searched together with a finance word, so ordinary posts aren't billed.
 # aliases:          other symbols that mean the same company ($GOOG -> GOOGL).
 # benchmark:        market proxies; never analyzed as events.
 tickers:
@@ -83,7 +86,7 @@ tickers:
   - { symbol: TSM, names: [TSMC, Taiwan Semiconductor] }
   - { symbol: MU, ambiguous_names: [Micron] }
   - { symbol: ARM, names: [Arm Holdings] }
-  - { symbol: SMCI, names: [Supermicro, Super Micro] }
+  - { symbol: SMCI, names: [Supermicro], cased_names: [Super Micro] }
   - { symbol: PLTR, names: [Palantir] }
   - { symbol: ORCL, ambiguous_names: [Oracle] }
   - { symbol: CRM, names: [Salesforce] }
@@ -117,7 +120,7 @@ tickers:
   - { symbol: LMT, names: [Lockheed Martin, Lockheed] }
   - { symbol: RTX, names: [Raytheon] }
   - { symbol: NOC, names: [Northrop Grumman, Northrop] }
-  - { symbol: GD, names: [General Dynamics] }
+  - { symbol: GD, cased_names: [General Dynamics] }
 
   # Consumer / retail
   - { symbol: WMT, names: [Walmart] }
@@ -164,4 +167,4 @@ tickers:
   # Telecom / media / politics-adjacent
   - { symbol: T, names: ["AT&T"] }
   - { symbol: VZ, names: [Verizon] }
-  - { symbol: DJT, names: [Trump Media], ambiguous_names: [Truth Social] }
+  - { symbol: DJT, cased_names: [Trump Media], ambiguous_names: [Truth Social] }

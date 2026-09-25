@@ -52,6 +52,16 @@ class PostSink:
         return result
 
 
+def sync_accounts(conn: sqlite3.Connection, watchlist: Watchlist) -> None:
+    """Mirror the config's X and Truth Social accounts into the accounts table.
+    Accounts removed from the config are deactivated, not deleted, so their posts keep their author row."""
+    with conn:
+        for platform, accounts in (("x", watchlist.x.accounts), ("truthsocial", watchlist.truthsocial.accounts)):
+            for a in accounts:
+                db.upsert_account(conn, platform, a.handle, a.category, a.active)
+            db.deactivate_missing_accounts(conn, platform, [a.handle for a in accounts])
+
+
 def universe_fingerprint(watchlist: Watchlist) -> str:
     payload = {
         "tickers": [t.model_dump() for t in watchlist.tickers],

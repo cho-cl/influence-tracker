@@ -471,3 +471,40 @@ sentiment. There's no deadline, because 1-minute data is already being kept.
     `@pytest.mark.slow` test runs the real model.
 - Live smoke test for each milestone: `influence daily`, then `influence status`, then inspect rows with
   `sqlite3`. For M2 and M3, also hand-check against Yahoo charts as described in the gates.
+
+## As built — M1 differences from this plan (2026-09-25)
+
+Facts found while building. Where they contradict a section above, this section wins.
+
+- **Truth Social ignores `min_id` and `exclude_reblogs`** (verified live). The collector walks each account
+  backward with `max_id` from the newest post down to its watermark. Progress is saved after every page
+  (`sweep:<handle>`), and the watermark moves only when a walk finishes, so an interrupted run resumes without
+  gaps. Reblogs are filtered client-side. The backfill walks backward from the first-run start to `--since`.
+  Pages hold at most 20 posts; a short page does not mean the end of history.
+- **X progress is per query.** Each query records what it has read. After a budget stop, the next run reads
+  the unread older part first. Posts that age out of the 7-day window before they are read are logged as a
+  window gap, and the run is marked partial. Pacing: the daily allowance × days since the last caught-up run
+  (at most 7), minus what unfinished runs have already read, within the billing-cycle budget. A 1-hour slack
+  stops scheduler drift from counting a day twice.
+- **X queries: ambiguous names only appear together with a finance word.** X keyword search ignores case,
+  so "Target", "Block", "Meta" or "Truth Social" alone would bill every ordinary post. Those names are
+  searched in separate queries that also require one of: stock, stocks, shares, earnings, investors, buy,
+  sell, bullish, bearish, "price target". That's 11 queries per run for the starter watchlist. Post text is
+  HTML-unescaped. HTTP 402 (credits depleted) is an error.
+- **Mentions.**
+  - New `cased_names`: names that must be capitalized but need no finance word ("Super Micro", "General
+    Dynamics", "Trump Media").
+  - On their own, calls, puts, options, long and short are not finance-context words, because each is everyday
+    English. Precise forms like "call options" and "short seller" still count.
+  - Trader jargon is excluded: "price target", "block trade", "shell company", "Oracle of Omaha".
+  - RTX is stoplisted for bare Reddit tickers, because on Reddit it usually means Nvidia GPUs.
+- **Reddit.**
+  - Unauthenticated RSS allows about one request per minute (`x-ratelimit-*` headers), so 5 subreddits take
+    about 5 minutes.
+  - AutoModerator's daily and weekly threads are skipped.
+- **Yahoo 1-minute data.**
+  - Limits: at most 8 days per request (we use 7) and 30 days back.
+  - Minutes with no trades have no bar, so a normal day has about 820–945 bars, not 960.
+  - Extended-hours volume is mostly 0, so M2/M3 should not build volume metrics on extended-hours bars.
+- **Schedule: 8:30 PM local** (this machine is on US Eastern time). Extended hours end at 8 PM ET, so a
+  6:30 PM run would only save the day's bars the next day. The trigger follows local time across DST.

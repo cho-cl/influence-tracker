@@ -1,0 +1,7 @@
+{
+  "title": "UsageCapExceeded",
+  "detail": "Usage cap exceeded: Monthly product cap",
+  "type": "https://api.x.com/2/problems/usage-capped",
+  "period": "Monthly",
+  "scope": "Product"
+}

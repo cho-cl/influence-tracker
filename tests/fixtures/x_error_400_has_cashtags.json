@@ -1,0 +1,15 @@
+{
+  "errors": [
+    {
+      "parameters": {
+        "query": [
+          "(from:elonmusk OR from:jimcramer) (has:cashtags OR Tesla) -is:retweet"
+        ]
+      },
+      "message": "There were errors processing your request: Reference to invalid operator 'has:cashtags'. Operator is not available in current product or product packaging. Please refer to complete available operator list at https://developer.x.com/en/docs/twitter-api/tweets/search/integrate/operators. (at position 37)"
+    }
+  ],
+  "title": "Invalid Request",
+  "detail": "One or more parameters to your request was invalid.",
+  "type": "https://api.x.com/2/problems/invalid-request"
+}

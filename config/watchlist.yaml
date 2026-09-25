@@ -56,8 +56,9 @@ prices:
 
 # Uppercase words that are also tickers but usually mean something else. Bare (no $)
 # ticker matching only runs on Reddit, and skips these.
-# RTX: on Reddit usually Nvidia's GPU line ("RTX 5090"); Raytheon still matches via $RTX and its name.
-bare_ticker_stoplist: [CAT, ARM, COST, SHOP, SPOT, SNAP, HOOD, COIN, MAT, PEP, XYZ, DIS, RTX]
+# RTX: on Reddit usually Nvidia's GPU line ("RTX 5090"). CRM: the software category ("buying a CRM").
+# Both companies still match via their cashtags and names.
+bare_ticker_stoplist: [CAT, ARM, COST, SHOP, SPOT, SNAP, HOOD, COIN, MAT, PEP, XYZ, DIS, RTX, CRM]
 
 # names:            matched case-insensitively on word boundaries.
 # cased_names:      must be capitalized, no finance word needed ("Super Micro" but not "super micro-cap").
@@ -145,7 +146,7 @@ tickers:
   - { symbol: JPM, names: [JPMorgan, JP Morgan, J.P. Morgan] }
   - { symbol: BAC, names: [Bank of America] }
   - { symbol: GS, names: [Goldman Sachs], ambiguous_names: [Goldman] }
-  - { symbol: WFC, names: [Wells Fargo] }
+  - { symbol: WFC, names: [Wells Fargo, WellsFargo] }
   - { symbol: V, ambiguous_names: [Visa] }
   - { symbol: MA, names: [Mastercard] }
   - { symbol: BRK.B, names: [Berkshire Hathaway, Berkshire], aliases: [BRK.A] }

@@ -17,7 +17,8 @@ from .timeutil import NY, from_iso, to_iso
 log = logging.getLogger(__name__)
 
 MARKET = "SPY"
-DAILY_LOOKBACK_SESSIONS = 150
+# M3 placebo days reach back 130 sessions and each needs its own 130-session estimation window.
+DAILY_LOOKBACK_SESSIONS = 300
 # An event completes once daily bars reach d0+5 (the end of the M3 post-event window).
 DAILY_LOOKAHEAD_SESSIONS = 5
 SPLIT_WINDOW_SESSIONS = 5
@@ -435,9 +436,9 @@ def enrich_events(
     fetch_earnings: prices.EarningsFetch | None = None,
     sleep: Callable[[float], None] = time.sleep,
 ) -> dict:
-    """Sync events with mentions, recompute clustering, refresh daily bars (every event ticker plus SPY, from 150
-    sessions before the earliest d0) and earnings dates (tickers with pending events), then complete every pending
-    event whose data is ready."""
+    """Sync events with mentions, recompute clustering, refresh daily bars (every event ticker plus SPY, from
+    DAILY_LOOKBACK_SESSIONS before the earliest d0) and earnings dates (tickers with pending events), then complete
+    every pending event whose data is ready."""
     synced = sync_events(conn, watchlist, now)
     recompute_clustered(conn)
 

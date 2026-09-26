@@ -778,11 +778,11 @@ def test_enrich_recomputes_clustering_for_complete_events(env, conn):
 # ---------------------------------------------------------------- enrich plumbing
 
 
-def test_enrich_downloads_event_tickers_and_spy_from_150_sessions_before_the_first_d0(env, conn):
+def test_enrich_downloads_event_tickers_and_spy_from_the_lookback_before_the_first_d0(env, conn):
     add_post(conn, "p1", ny(2026, 11, 4, 10, 0, 30), tickers=[T, "BRK.B"])
     add_post(conn, "p2", ny(2026, 11, 9, 10, 0, 30), tickers=["TSLA"])
     counts = env.enrich()
-    start = market.session_offset(date(2026, 11, 4), -150)
+    start = market.session_offset(date(2026, 11, 4), -300)
     today = date(2026, 11, 12)
     assert env.daily.calls == [("BRK-B", start, today), (T, start, today), ("TSLA", start, today), (SPY, start, today)]
     assert counts["daily"]["requests"] == 4 and counts["daily"]["status"] == "ok"

@@ -12,6 +12,9 @@ the stock. Built for the Wharton Global High School Investment Competition.
 - **Label:** a local finance-sentiment model (FinTwitBERT) marks each stock post bullish, bearish or neutral.
 - **Events:** every post × ticker gets its event day, a no-look-ahead reference price, and the stock's and
   SPY's moves before and after the post.
+- **Analyze:** a market-model event study (abnormal returns before, around and after each post, stance-signed
+  tests per author, a placebo baseline of ordinary days) written to a self-contained `report.html` with
+  charts and CSVs.
 
 See `docs/PLAN.md` for the full design, the methodology and what was verified.
 
@@ -35,6 +38,7 @@ uv run influence classify     # label new stock posts bullish / bearish / neutra
 uv run influence enrich       # build events: daily bars, earnings, reference prices, return windows
 uv run influence status       # health, counts, X spend, coverage
 uv run influence events       # table of events (--id N for one in detail, --csv FILE to export)
+uv run influence analyze      # event-study report -> reports/<date>/report.html (+ CSVs, charts); --open to view
 uv run influence backfill truthsocial --since 2025-01-20   # one-time, slow, resumable
 ```
 

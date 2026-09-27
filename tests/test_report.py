@@ -558,7 +558,7 @@ def test_write_report_realistic_study(tmp_path, priced_conn):
 
     # sections in order
     headings = [
-        "How social-media posts moved stocks",
+        "Do social-media posts move stocks?",
         "How this works",
         "The average path around a post",
         "Results by author",

@@ -484,7 +484,7 @@ def _section_title(study: Study, h: Headline) -> str:
     return (
         "<header>"
         '<p class="kicker">Event study · exploratory</p>'
-        "<h1>How social-media posts moved stocks</h1>"
+        "<h1>Do social-media posts move stocks?</h1>"
         f'<p class="meta">Generated {esc(_generated(study))} · {esc(_date_range(study))}</p>'
         f'<p class="meta">{esc(coverage)}</p>'
         "</header>"
@@ -1268,7 +1268,7 @@ def _render(study: Study, figs: dict[str, Path | None], top: list[TopEvent], fil
         '<!DOCTYPE html>\n<html lang="en"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
         '<meta name="color-scheme" content="light">'
-        "<title>How social-media posts moved stocks</title>"
+        "<title>Do social-media posts move stocks?</title>"
         f"<style>{_CSS}</style></head><body><main>{''.join(sections)}</main>{_PRINT_SCRIPT}</body></html>\n"
     )
 

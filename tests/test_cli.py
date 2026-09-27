@@ -658,7 +658,7 @@ def test_analyze_with_the_real_report_writer(root, monkeypatch, capsys, tmp_path
     assert cli.main(["analyze", "--out", str(out)]) == 0
 
     page = (out / "report.html").read_text(encoding="utf-8")
-    assert "How social-media posts moved stocks" in page and "No complete events yet." in page
+    assert "Do social-media posts move stocks?" in page and "No complete events yet." in page
     assert (out / "events.csv").is_file() and (out / "summary.csv").is_file()
     assert "Posts analyzed: 0" in capsys.readouterr().out
 

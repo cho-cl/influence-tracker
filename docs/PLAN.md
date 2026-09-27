@@ -539,3 +539,45 @@ Facts found while building. Where they contradict a section above, this section 
   Yahoo 1-minute download, across after-hours, weekend, Labor Day and regular-session posts with truncated
   windows. The check covered d0, phase, reference bar and price, legs, and all windows for the ticker and SPY.
   Result: 0 mismatches.
+
+## As built — M3 notes (2026-09-26)
+
+- **Daily windows actually used** (standard event-study windows; this replaces the day-0-legs-first framing
+  above):
+  - pre = CAR[−5,−1]: did the stock already move before the post?
+  - event = CAR[0,+1]: the headline window.
+  - post = CAR[+2,+5]: did the move continue or reverse?
+
+  The day-0 legs and the intraday windows remain as a decomposition wherever 1-minute data exists.
+- **Market model.** OLS on sessions −130..−11, with at least 60 observations; otherwise the event is marked
+  `no_model`. σ is the residual standard deviation (n−2 degrees of freedom), and z = CAR / (σ·√L).
+  - Leg z-scores use the full-day σ, which is conservative.
+  - Intraday z-scores use σ of the same clock window over the prior 20 sessions (at least 10 needed).
+- **Post-level statistics.**
+  - A post's CAR is the mean over its included events.
+  - Its z treats those events as **one equal-weighted portfolio**: σ_p comes from the averaged
+    estimation-window residuals. For a one-stock post this equals the event z. It replaces a plain mean of
+    z-scores, which understated multi-stock posts: under no effect the standard deviation was 1/√k.
+  - A very volatile stock dominates a mixed post's σ_p.
+- **Tests.** One-sample t-tests on stance-signed post CARs, with Holm correction within each family (author,
+  category, …), subset and window. Any group with n < 10 is reported as insufficient and not tested.
+- **Placebo days.**
+  - Up to 5 per included event, drawn from sessions −130..−10.
+  - Skipped: days within ±5 sessions of any event on that ticker, within ±1 session of an earnings report,
+    or within ±5 of a split (the same screens events get, unless `--include-*`).
+  - Each placebo day gets its own market model.
+  - A stock-day drawn for two events counts once.
+- **Daily-bar lookback raised to 300 sessions** (enrich), so each placebo day has its own estimation window.
+- **Disclosed, not corrected.**
+  - Different posts on the same stock can have overlapping windows. An opt-in `--exclude-overlap` was
+    proposed and deferred.
+  - Estimation windows can contain other posts' reactions.
+  - Day 0 of a regular-session post includes the move before the post.
+- **Verification.**
+  - A reviewer re-implemented the whole method independently and compared it cell by cell: 0 mismatches on
+    events, placebo days, posts, groups, paths and magnitude.
+  - The portfolio z was verified independently, including correlated and identical-stock cases.
+  - Headline statistics were recomputed from the exported CSVs with scipy and matched.
+- **First full-history result (2026-09-26).** 117 stance-labelled posts; mean signed CAR[0,+1] −0.28%
+  (95% CI −0.90% to +0.35%, p = 0.38). The share of |z| > 1.96 in the event window was 5.5%, against 5.6%
+  on placebo days. In the pre window it was 11.5% against 5.9%: stocks were already moving before the posts.

@@ -55,7 +55,9 @@ EVENT_COLUMNS: tuple[str, ...] = (
 POST_COLUMNS: tuple[str, ...] = (
     "platform", "native_id", "author", "category", "t0", "t0_et", "stance", "stance_conf", "sign",
     "n_events", "tickers",
-    # means over the post's included events; signed_* = sign * value (NaN when sign is 0 or NaN)
+    # means over the post's included events, except z_*: the equal-weighted portfolio z of the events with a finite
+    # car_*, mean CAR / (sigma_p * sqrt(L)), sigma_p = residual std of their mean estimation residual over the days all
+    # of them have one (NaN below MIN_ESTIMATION_OBS such days); signed_* = sign * value (NaN when sign is 0 or NaN)
     "car_pre", "car_event", "car_post", "z_pre", "z_event", "z_post",
     "signed_car_pre", "signed_car_event", "signed_car_post",
     "ar_dm5", "ar_dm4", "ar_dm3", "ar_dm2", "ar_dm1", "ar_d0", "ar_dp1", "ar_dp2", "ar_dp3", "ar_dp4", "ar_dp5",

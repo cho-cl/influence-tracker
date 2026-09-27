@@ -15,6 +15,7 @@ import yaml
 from pydantic import ValidationError
 
 from . import db, eventsview, ingest
+from .analysis.study import Study, StudyOptions
 from .config import Settings, Watchlist, load_settings, load_watchlist
 from .logsetup import force_utf8_stdio, setup_logging
 from .status import PLATFORMS, format_counts, show_status
@@ -37,6 +38,14 @@ class StageResult:
     status: str
     counts: dict
     error: str | None
+
+
+@dataclass
+class Analysis:
+    """What a successful analyze stage produced, for the terminal summary."""
+
+    study: Study | None = None
+    report: Path | None = None
 
 
 class Pipeline:
@@ -98,6 +107,21 @@ class Pipeline:
             return backfill_truthsocial(self.conn, self.watchlist, _require(sink, setup_error), run_id, since, now)
 
         self._stage("backfill:truthsocial", run)
+
+    def analyze(self, options: StudyOptions, out_dir: Path) -> Analysis:
+        result = Analysis()
+
+        def run(run_id: int, now: datetime) -> object:
+            from .analysis.metrics import compute_study
+            from .analysis.report import write_report
+
+            study = compute_study(self.conn, self.watchlist, now, options)
+            report = write_report(study, self.conn, out_dir)
+            result.study, result.report = study, report
+            return {**study.counts, "status": "ok", "report": str(report)}
+
+        self._stage("analyze", run)
+        return result
 
     # ------------------------------------------------------------ internals
 
@@ -229,7 +253,8 @@ def build_parser() -> argparse.ArgumentParser:
         prog="influence",
         description=(
             "Collect stock posts from X, Truth Social and Reddit, snapshot 1-minute prices, label each post's "
-            "stance and turn every ticker mention into an event with its reference price and returns."
+            "stance, turn every ticker mention into an event with its reference price and returns, and measure "
+            "how the posts moved the stocks."
         ),
     )
     sub = parser.add_subparsers(dest="command", required=True, metavar="COMMAND")
@@ -263,6 +288,31 @@ def build_parser() -> argparse.ArgumentParser:
     detail = events.add_mutually_exclusive_group()
     detail.add_argument("--id", type=int, dest="event_id", metavar="N", help="show one event in full")
     detail.add_argument("--csv", type=Path, metavar="PATH", help="export the matching events to a CSV file for Excel")
+    analyze = sub.add_parser(
+        "analyze",
+        help="event study: abnormal returns vs SPY, placebo days, charts and report.html",
+        description=(
+            "Measure how posts moved stocks over every complete event: market-model abnormal returns, z-scores, "
+            "placebo days and group tests. Writes report.html, CSVs and charts to a folder."
+        ),
+    )
+    analyze.add_argument(
+        "--since", type=_iso_date, metavar="YYYY-MM-DD", help="only events whose post day (d0) is on or after this"
+    )
+    analyze.add_argument(
+        "--until", type=_iso_date, metavar="YYYY-MM-DD", help="only events whose post day (d0) is on or before this"
+    )
+    analyze.add_argument(
+        "--include-earnings", action="store_true", help="keep events within 1 session of an earnings announcement"
+    )
+    analyze.add_argument("--include-splits", action="store_true", help="keep events near a stock split")
+    analyze.add_argument(
+        "--include-clustered", action="store_true", help="keep repeat posts about a ticker in the same session"
+    )
+    analyze.add_argument(
+        "--out", type=Path, metavar="DIR", help="output folder (default reports/<today's New York date>/)"
+    )
+    analyze.add_argument("--open", action="store_true", dest="open_report", help="open report.html when done")
     backfill = sub.add_parser("backfill", help="one-time, slow history backfill (resumable)")
     backfill.add_argument("source", choices=["truthsocial"])
     backfill.add_argument("--since", required=True, type=_iso_date, metavar="YYYY-MM-DD")
@@ -331,9 +381,13 @@ def _dispatch(
     if args.command == "backfill" and args.since > clock().astimezone(NY).date():
         print(f"--since {args.since} is in the future", file=sys.stderr)
         return 2
+    if args.command == "analyze" and args.since and args.until and args.since > args.until:
+        print(f"--since {args.since} is after --until {args.until}", file=sys.stderr)
+        return 2
 
     log.info("influence %s (root %s)", args.command, settings.root)
     pipeline = Pipeline(settings, watchlist, conn, clock)
+    analysis: Analysis | None = None
     if args.command == "collect":
         pipeline.collect(args.only)
     elif args.command == "snapshot":
@@ -349,6 +403,16 @@ def _dispatch(
         pipeline.enrich()
     elif args.command == "backfill":
         pipeline.backfill_truthsocial(args.since)
+    elif args.command == "analyze":
+        options = StudyOptions(
+            since=args.since,
+            until=args.until,
+            include_earnings=args.include_earnings,
+            include_splits=args.include_splits,
+            include_clustered=args.include_clustered,
+        )
+        out_dir = args.out or settings.reports_dir / clock().astimezone(NY).date().isoformat()
+        analysis = pipeline.analyze(options, out_dir)
     else:
         raise ValueError(f"unhandled command {args.command!r}")
 
@@ -357,7 +421,42 @@ def _dispatch(
         tally[result.status] = tally.get(result.status, 0) + 1
     summary = ", ".join(f"{n} {status}" for status, n in tally.items())
     log.info("influence %s finished: %s -> exit %d", args.command, summary, pipeline.exit_code)
+    if analysis is not None:
+        _print_analysis(analysis, pipeline.results[-1], args.open_report)
     return pipeline.exit_code
+
+
+def _print_analysis(analysis: Analysis, result: StageResult, open_report: bool) -> None:
+    if analysis.report is None or analysis.study is None:
+        hint = " (is a CSV open in Excel?)" if (result.error or "").startswith("PermissionError") else ""
+        print(f"analyze failed: {result.error}{hint}; details are in the log", file=sys.stderr)
+        return
+    from .analysis.report import headlines
+
+    print(f"Report: {analysis.report.resolve()}")
+    try:
+        lines = headlines(analysis.study)
+    # The report is already written and the run recorded; a summary bug must not turn that into a crash.
+    except Exception:
+        log.exception("could not summarize the study for the terminal")
+        lines = ["(summary unavailable; see the report and the log)"]
+    for line in lines:
+        print(f"  {line}")
+    if open_report:
+        _open_file(analysis.report)
+
+
+def _open_file(path: Path) -> None:
+    startfile = getattr(os, "startfile", None)
+    try:
+        if startfile is not None:
+            startfile(path)
+        else:
+            import webbrowser
+
+            webbrowser.open(path.resolve().as_uri())
+    except OSError as e:
+        print(f"cannot open {path}: {e}", file=sys.stderr)
 
 
 def _events(args: argparse.Namespace, watchlist: Watchlist, conn: sqlite3.Connection) -> int:

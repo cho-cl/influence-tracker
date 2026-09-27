@@ -13,10 +13,23 @@ import types
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
+import pandas as pd
 import pytest
 from rich.console import Console
 
 from influence_tracker import cli, db, ingest, logsetup, status
+from influence_tracker.analysis import report
+from influence_tracker.analysis.study import (
+    ATTENTION_COLUMNS,
+    EVENT_COLUMNS,
+    GROUP_COLUMNS,
+    INTRADAY_PATH_COLUMNS,
+    MAGNITUDE_COLUMNS,
+    PATH_COLUMNS,
+    POST_COLUMNS,
+    Study,
+    StudyOptions,
+)
 from influence_tracker.config import REPO_ROOT
 from influence_tracker.models import MatchResult, Mention, Post
 
@@ -504,6 +517,185 @@ def test_events_csv_that_cannot_be_written_exits_1(root, capsys, tmp_path):
 )
 def test_events_rejects_bad_arguments(root, argv):
     assert cli.main(argv) == 2
+
+
+# ---------------------------------------------------------------- analyze
+
+
+def _empty_study(options: StudyOptions, now: datetime) -> Study:
+    def empty(columns: tuple[str, ...]) -> pd.DataFrame:
+        return pd.DataFrame(columns=list(columns))
+
+    return Study(
+        options=options,
+        generated_at=now,
+        events=empty(EVENT_COLUMNS),
+        posts=empty(POST_COLUMNS),
+        groups=empty(GROUP_COLUMNS),
+        magnitude=empty(MAGNITUDE_COLUMNS),
+        car_path=empty(PATH_COLUMNS),
+        intraday_path=empty(INTRADAY_PATH_COLUMNS),
+        attention=empty(ATTENTION_COLUMNS),
+        counts={"events_complete": 0, "events_included": 0, "posts_included": 0},
+        notes=["No complete events yet."],
+    )
+
+
+class Analysis:
+    def __init__(self):
+        self.calls: list[tuple] = []
+        self.reports: list[tuple] = []
+        self.error: BaseException | None = None
+        self.report_error: BaseException | None = None
+
+    def compute_study(self, conn, watchlist, now, options):
+        self.calls.append((conn, watchlist, now, options))
+        if self.error is not None:
+            raise self.error
+        return _empty_study(options, now)
+
+    def write_report(self, study, conn, out_dir):
+        self.reports.append((study, conn, out_dir))
+        if self.report_error is not None:
+            raise self.report_error
+        out_dir.mkdir(parents=True, exist_ok=True)
+        path = out_dir / "report.html"
+        path.write_text("<!DOCTYPE html>", encoding="utf-8")
+        return path
+
+
+@pytest.fixture
+def analysis(monkeypatch) -> Analysis:
+    """compute_study (metrics.py) and write_report replaced by recorders."""
+    rec = Analysis()
+    _install(monkeypatch, "influence_tracker.analysis.metrics", compute_study=rec.compute_study)
+    monkeypatch.setattr(report, "write_report", rec.write_report)
+    return rec
+
+
+def test_analyze_builds_the_options_writes_the_report_and_records_a_run(root, analysis, capsys, fixed_now, watchlist):
+    argv = ["analyze", "--since", "2026-08-01", "--until", "2026-09-18", "--include-earnings", "--include-clustered"]
+
+    assert cli.main(argv) == 0
+
+    [(conn, watchlist_arg, now, options)] = analysis.calls
+    assert isinstance(conn, sqlite3.Connection) and watchlist_arg == watchlist and now == fixed_now
+    assert options == StudyOptions(
+        since=date(2026, 8, 1), until=date(2026, 9, 18), include_earnings=True, include_clustered=True
+    )
+    [(study, report_conn, out_dir)] = analysis.reports
+    assert report_conn is conn and study.options == options
+    # 22:30 UTC on Sep 24 is still Sep 24 in New York.
+    assert out_dir == root / "reports" / "2026-09-24"
+    assert _runs(root) == [("analyze", "ok", None)]
+    [(counts_json,)] = _query(root, "SELECT counts_json FROM runs")
+    assert '"posts_included": 0' in counts_json and "report.html" in counts_json
+
+    out = capsys.readouterr().out.splitlines()
+    assert out[0] == f"Report: {(out_dir / 'report.html').resolve()}"
+    assert out[1:] == [
+        "  Posts analyzed: 0 (0 events included, 0 excluded)",
+        "  Mean signed CAR[0,+1]: insufficient data (n = 0 signed posts; the test needs 10)",
+        "  |z| > 1.96 in the event window: insufficient data (no events with a z-score)",
+    ]
+
+
+def test_analyze_defaults_leave_every_exclusion_on(root, analysis):
+    assert cli.main(["analyze"]) == 0
+    assert analysis.calls[0][3] == StudyOptions()
+
+
+def test_analyze_out_folder_and_open(root, analysis, monkeypatch, tmp_path, capsys):
+    opened: list[Path] = []
+    monkeypatch.setattr(cli.os, "startfile", opened.append, raising=False)
+    target = tmp_path / "my reports" / "run 1"
+
+    assert cli.main(["analyze", "--out", str(target), "--include-splits", "--open"]) == 0
+
+    assert analysis.reports[0][2] == target
+    assert analysis.calls[0][3].include_splits is True
+    assert opened == [target / "report.html"]
+    assert f"Report: {(target / 'report.html').resolve()}" in capsys.readouterr().out
+
+
+def test_analyze_does_not_open_a_report_that_failed(root, analysis, monkeypatch, capsys):
+    opened: list[Path] = []
+    monkeypatch.setattr(cli.os, "startfile", opened.append, raising=False)
+    analysis.error = ValueError("events table is empty")
+
+    assert cli.main(["analyze", "--open"]) == 1
+
+    assert opened == [] and analysis.reports == []
+    assert _runs(root) == [("analyze", "error", "ValueError: events table is empty")]
+    err = capsys.readouterr().err
+    assert "analyze failed: ValueError: events table is empty; details are in the log" in err
+    assert "Traceback" in (root / "logs" / "influence.log").read_text(encoding="utf-8")
+
+
+def test_analyze_hints_at_excel_when_a_file_is_locked(root, analysis, capsys):
+    analysis.report_error = PermissionError(13, "Permission denied", "events.csv")
+
+    assert cli.main(["analyze"]) == 1
+
+    assert _runs(root)[0][:2] == ("analyze", "error")
+    assert "(is a CSV open in Excel?)" in capsys.readouterr().err
+
+
+def test_analyze_fails_cleanly_without_the_metrics_module(root, monkeypatch):
+    monkeypatch.setitem(sys.modules, "influence_tracker.analysis.metrics", None)
+
+    assert cli.main(["analyze"]) == 1
+
+    [(stage, state, error)] = _runs(root)
+    assert (stage, state) == ("analyze", "error") and error.startswith("ModuleNotFoundError")
+
+
+def test_analyze_with_the_real_report_writer(root, monkeypatch, capsys, tmp_path):
+    rec = Analysis()
+    _install(monkeypatch, "influence_tracker.analysis.metrics", compute_study=rec.compute_study)
+    out = tmp_path / "out"
+
+    assert cli.main(["analyze", "--out", str(out)]) == 0
+
+    page = (out / "report.html").read_text(encoding="utf-8")
+    assert "How social-media posts moved stocks" in page and "No complete events yet." in page
+    assert (out / "events.csv").is_file() and (out / "summary.csv").is_file()
+    assert "Posts analyzed: 0" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["analyze", "--since", "2026-13-01"],
+        ["analyze", "--until", "yesterday"],
+        ["analyze", "--since", "2026-09-10", "--until", "2026-09-01"],
+        ["analyze", "--out"],
+        ["analyze", "--include-everything"],
+    ],
+)
+def test_analyze_rejects_bad_arguments(root, analysis, argv):
+    assert cli.main(argv) == 2
+    assert analysis.calls == []
+    assert _query(root, "SELECT COUNT(*) FROM runs") == [(0,)]
+
+
+def test_analyze_is_listed_in_help(capsys):
+    assert cli.main(["--help"]) == 0
+    assert "analyze" in capsys.readouterr().out
+    assert cli.main(["analyze", "--help"]) == 0
+    out = capsys.readouterr().out
+    for flag in ("--since", "--until", "--include-earnings", "--include-splits", "--include-clustered", "--out"):
+        assert flag in out
+
+
+def test_importing_the_cli_does_not_load_heavy_libraries():
+    code = (
+        "import sys, influence_tracker.cli; "
+        "print(sorted(m for m in ('matplotlib', 'scipy', 'torch', 'transformers', 'yfinance') if m in sys.modules))"
+    )
+    proc = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == "[]"
 
 
 # ---------------------------------------------------------------- config errors

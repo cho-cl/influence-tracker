@@ -122,6 +122,9 @@ only). Posts already stored before `watch` first runs get no follow-ups (see the
   - One history line from the latest study numbers for that author, e.g. `History: realDonaldTrump's posts moved
     their stocks −0.60% on average over 2 days (n=71, p=0.17, not significant)`. For fewer than 10 past posts:
     `History: fewer than 10 past posts`.
+    - Source: the author's row (family `author`, subset `main`, window `event`) from a fresh
+      `metrics.compute_study` run. It runs at most once per cycle, and only when a heads-up is being built (about
+      5 s).
 
 **2. `follow_60m`** — one per post, reporting each ticker (up to 5; then "+N more, see `influence events`").
 

@@ -241,6 +241,42 @@ def _fit(daily: _Daily, rows: Sequence[int] | np.ndarray, anchors: Sequence[int]
     )
 
 
+@dataclass(frozen=True)
+class EventModel:
+    """One event's market model and abnormal returns around d0, for live follow-ups before the event completes."""
+
+    alpha: float
+    beta: float
+    sigma: float
+    n_est: int
+    ar: dict[int, float]
+
+    def car(self, first: int, last: int) -> tuple[float, float]:
+        values = [self.ar.get(k, _NAN) for k in range(first, last + 1)]
+        if not all(math.isfinite(v) for v in values):
+            return _NAN, _NAN
+        car = float(sum(values))
+        return car, car / (self.sigma * math.sqrt(last - first + 1))
+
+
+def event_model(conn: sqlite3.Connection, ticker: str, d0: date) -> EventModel | None:
+    """The same market model compute_study fits (sessions -130..-11 before d0), for a single (ticker, d0)."""
+    daily = _Daily(conn, [ticker, MARKET])
+    anchor = daily.index(d0)
+    if anchor < 0:
+        return None
+    fit = _fit(daily, [daily.symbol_row(ticker)], [anchor])
+    if not bool(fit.ok[0]):
+        return None
+    return EventModel(
+        alpha=float(fit.alpha[0]),
+        beta=float(fit.beta[0]),
+        sigma=float(fit.sigma[0]),
+        n_est=int(fit.n[0]),
+        ar={k: float(fit.ar[0, i]) for i, k in enumerate(PATH_DAYS)},
+    )
+
+
 # ---------------------------------------------------------------- same-clock intraday volatility
 
 

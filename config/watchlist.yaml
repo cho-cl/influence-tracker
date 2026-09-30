@@ -65,6 +65,16 @@ sentiment:
 # Both companies still match via their cashtags and names.
 bare_ticker_stoplist: [CAT, ARM, COST, SHOP, SPOT, SNAP, HOOD, COIN, MAT, PEP, XYZ, DIS, RTX, CRM]
 
+alerts:
+  enabled: true
+  # Tickers your team holds, e.g. [NVDA, AAPL]: shown with a star, listed first, higher priority.
+  holdings: []
+  poll_active_minutes: 5     # 04:00-20:00 New York on trading days
+  poll_idle_minutes: 30      # nights, weekends, holidays
+  poll_x_minutes: 15         # only when X_BEARER_TOKEN is set
+  late_after_minutes: 30     # posts found later than this go into one "while you were away" digest
+  followup_minutes: 60
+
 # names:            matched case-insensitively on word boundaries.
 # cased_names:      must be capitalized, no finance word needed ("Super Micro" but not "super micro-cap").
 # ambiguous_names:  must be capitalized AND appear with a finance word (stock, shares, buy, ...).

@@ -80,6 +80,17 @@ class SentimentConfig(BaseModel):
     batch_size: int = Field(default=16, ge=1, le=128)
 
 
+class AlertsConfig(BaseModel):
+    enabled: bool = True
+    # Tickers the team holds: marked with a star, listed first, higher notification priority.
+    holdings: list[str] = Field(default_factory=list)
+    poll_active_minutes: int = Field(default=5, ge=1, le=60)
+    poll_idle_minutes: int = Field(default=30, ge=1, le=240)
+    poll_x_minutes: int = Field(default=15, ge=5, le=240)
+    late_after_minutes: int = Field(default=30, ge=5, le=240)
+    followup_minutes: int = Field(default=60, ge=5, le=390)
+
+
 class Watchlist(BaseModel):
     x: XConfig
     truthsocial: TruthSocialConfig
@@ -87,6 +98,7 @@ class Watchlist(BaseModel):
     apewisdom: ApeWisdomConfig = Field(default_factory=ApeWisdomConfig)
     prices: PricesConfig = Field(default_factory=PricesConfig)
     sentiment: SentimentConfig = Field(default_factory=SentimentConfig)
+    alerts: AlertsConfig = Field(default_factory=AlertsConfig)
     bare_ticker_stoplist: list[str] = Field(default_factory=list)
     tickers: list[Ticker]
 
@@ -107,6 +119,14 @@ class Watchlist(BaseModel):
             if dupes:
                 raise ValueError(f"duplicate {platform} handles: {sorted(dupes)}")
         self.bare_ticker_stoplist = [s.upper() for s in self.bare_ticker_stoplist]
+        holdings: list[str] = []
+        for raw in self.alerts.holdings:
+            ticker = self.ticker(raw.strip())
+            if ticker is None:
+                raise ValueError(f"alerts.holdings: {raw.strip()!r} is not a configured ticker")
+            if ticker.symbol not in holdings:
+                holdings.append(ticker.symbol)
+        self.alerts.holdings = holdings
         return self
 
     def ticker(self, symbol: str) -> Ticker | None:
@@ -130,6 +150,8 @@ class Settings:
     logs_dir: Path
     reports_dir: Path
     x_bearer_token: str | None
+    ntfy_topic: str | None = None
+    ntfy_server: str = "https://ntfy.sh"
 
 
 def load_watchlist(path: Path) -> Watchlist:
@@ -141,6 +163,8 @@ def load_settings(root: Path | None = None) -> Settings:
     root = root or REPO_ROOT
     load_dotenv(root / ".env", encoding="utf-8")
     token = os.environ.get("X_BEARER_TOKEN", "").strip() or None
+    topic = os.environ.get("NTFY_TOPIC", "").strip() or None
+    server = os.environ.get("NTFY_SERVER", "").strip() or "https://ntfy.sh"
     data_dir = root / "data"
     return Settings(
         root=root,
@@ -150,4 +174,6 @@ def load_settings(root: Path | None = None) -> Settings:
         logs_dir=root / "logs",
         reports_dir=root / "reports",
         x_bearer_token=token,
+        ntfy_topic=topic,
+        ntfy_server=server,
     )

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections.abc import Iterable, Sequence
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from .models import Mention, Post
@@ -193,6 +193,25 @@ CREATE TABLE IF NOT EXISTS event_windows (
     truncated INTEGER NOT NULL DEFAULT 0,     -- clipped at the session open or close
     PRIMARY KEY (event_id, win)
 );
+
+-- Phone alerts sent or queued. UNIQUE is the no-duplicates guarantee: a row is 'pending' before sending and
+-- 'sent' only after ntfy accepted it. Digest rows use platform '-' and the cycle's UTC ISO time as native_id.
+CREATE TABLE IF NOT EXISTS alerts (
+    id INTEGER PRIMARY KEY,
+    kind TEXT NOT NULL,           -- heads_up | follow_60m | follow_d1 | digest
+    platform TEXT NOT NULL,
+    native_id TEXT NOT NULL,
+    due_at TEXT NOT NULL,         -- UTC ISO
+    status TEXT NOT NULL,         -- pending | sent | failed | skipped
+    attempts INTEGER NOT NULL DEFAULT 0,
+    title TEXT,
+    message TEXT,
+    error TEXT,
+    created_at TEXT NOT NULL,
+    sent_at TEXT,
+    UNIQUE (kind, platform, native_id)
+);
+CREATE INDEX IF NOT EXISTS alerts_due ON alerts (status, due_at);
 """
 
 
@@ -396,6 +415,67 @@ def x_spend_since(conn: sqlite3.Connection, since: datetime) -> float:
         "SELECT COALESCE(SUM(est_cost_usd), 0) AS s FROM x_usage WHERE ts >= ?", (to_iso(since),)
     ).fetchone()
     return float(row["s"])
+
+
+# ---------------------------------------------------------------- alert ledger
+
+
+def add_alert(
+    conn: sqlite3.Connection,
+    kind: str,
+    platform: str,
+    native_id: str,
+    due_at: datetime,
+    when: datetime,
+    *,
+    status: str = "pending",
+    title: str | None = None,
+    message: str | None = None,
+    error: str | None = None,
+) -> bool:
+    cur = conn.execute(
+        """INSERT OR IGNORE INTO alerts (kind, platform, native_id, due_at, status, title, message, error, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (kind, platform, native_id, to_iso(due_at), status, title, message, error, to_iso(when)),
+    )
+    return cur.rowcount == 1
+
+
+def alert_status(conn: sqlite3.Connection, kind: str, platform: str, native_id: str) -> str | None:
+    row = conn.execute(
+        "SELECT status FROM alerts WHERE kind = ? AND platform = ? AND native_id = ?", (kind, platform, native_id)
+    ).fetchone()
+    return row["status"] if row else None
+
+
+def due_alerts(conn: sqlite3.Connection, now: datetime, retry_for: timedelta) -> list[sqlite3.Row]:
+    """Pending rows that are due, plus failed rows still inside the retry period, oldest due first."""
+    return conn.execute(
+        """SELECT * FROM alerts
+           WHERE due_at <= ? AND (status = 'pending' OR (status = 'failed' AND due_at > ?))
+           ORDER BY due_at, id""",
+        (to_iso(now), to_iso(now - retry_for)),
+    ).fetchall()
+
+
+def mark_alert(
+    conn: sqlite3.Connection,
+    alert_id: int,
+    status: str,
+    when: datetime,
+    *,
+    title: str | None = None,
+    message: str | None = None,
+    error: str | None = None,
+) -> None:
+    conn.execute(
+        """UPDATE alerts SET status = ?,
+             attempts = attempts + CASE WHEN ? IN ('sent', 'failed') THEN 1 ELSE 0 END,
+             title = COALESCE(?, title), message = COALESCE(?, message), error = COALESCE(?, error),
+             sent_at = CASE WHEN ? = 'sent' THEN ? ELSE sent_at END
+           WHERE id = ?""",
+        (status, status, title, message, error, status, to_iso(when), alert_id),
+    )
 
 
 # ---------------------------------------------------------------- 1-minute bars

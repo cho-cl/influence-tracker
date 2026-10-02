@@ -102,12 +102,22 @@ def _stance(post: PostInfo) -> str:
 
 
 def _history_line(author: str, history: History | None) -> str:
-    if history is None or history.n_posts < MIN_GROUP_POSTS or history.p_holm is None:
-        return f"History: fewer than {MIN_GROUP_POSTS} past posts by {author}."
-    verdict = "significant at the 5% level" if history.p_holm < 0.05 else "not significant"
+    # mean_signed_car is +CAR after bullish posts and -CAR after bearish ones, and n_posts counts only those posts.
+    # A bare signed percentage would read as the stocks' own move, which is the opposite for bearish posts.
+    if history is None:
+        return f"History: no study numbers available for {author}."
+    if history.n_posts < MIN_GROUP_POSTS:
+        return f"History: fewer than {MIN_GROUP_POSTS} past bullish/bearish posts by {author} with price data."
+    mean = history.mean_signed_car
+    way = "in the direction" if mean >= 0 else "against the direction"
+    if history.p_holm is None:
+        stats = f"n={history.n_posts}, no p-value"
+    else:
+        verdict = "significant at the 5% level" if history.p_holm < 0.05 else "not significant"
+        stats = f"n={history.n_posts}, Holm p={history.p_holm:.2f}, {verdict}"
     return (
-        f"History: {author}'s posts moved their stocks {_pct(history.mean_signed_car)} on average over 2 days "
-        f"(n={history.n_posts}, Holm p={history.p_holm:.2f}, {verdict})."
+        f"History: after {author}'s bullish/bearish posts, the stocks moved {abs(mean) * 100:.2f}% {way} the post "
+        f"pointed, beyond what SPY explains, on average over 2 days ({stats})."
     )
 
 

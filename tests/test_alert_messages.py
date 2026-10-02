@@ -37,7 +37,7 @@ def test_heads_up_basic():
     assert "NVIDIA is doing GREAT" in msg.body
     assert "Posted Tue Sep 29 10:31 ET" in msg.body
     assert "NVDA $182.41" in msg.body
-    assert "History: fewer than 10 past posts by realDonaldTrump." in msg.body
+    assert "History: no study numbers available for realDonaldTrump." in msg.body
 
 
 def test_heads_up_holdings_first_with_star_and_high_priority():
@@ -70,11 +70,41 @@ def test_heads_up_without_stance():
 def test_history_line_significant_and_not():
     ok = m.heads_up(post(), set(), {}, m.History(71, -0.00604, 0.50))
     assert (
-        "History: realDonaldTrump's posts moved their stocks -0.60% on average over 2 days "
-        "(n=71, Holm p=0.50, not significant)."
+        "History: after realDonaldTrump's bullish/bearish posts, the stocks moved 0.60% against the direction the "
+        "post pointed, beyond what SPY explains, on average over 2 days (n=71, Holm p=0.50, not significant)."
     ) in ok.body
     sig = m.heads_up(post(), set(), {}, m.History(40, 0.0123, 0.01))
-    assert "(n=40, Holm p=0.01, significant at the 5% level)." in sig.body
+    assert (
+        "the stocks moved 1.23% in the direction the post pointed, beyond what SPY explains, on average over 2 days "
+        "(n=40, Holm p=0.01, significant at the 5% level)."
+    ) in sig.body
+
+
+def history_line(msg: m.Message) -> str:
+    return next(line for line in msg.body.splitlines() if line.startswith("History:"))
+
+
+def test_history_line_reads_the_signed_car_against_the_post_direction():
+    # mean_signed_car is +CAR after bullish posts and -CAR after bearish ones: +0.60% for a bearish-heavy author means
+    # the stocks fell, so the line must say which way relative to the post, never print a bare signed move.
+    bearish = post(stance="bearish", stance_conf=0.9)
+    fell = history_line(m.heads_up(bearish, set(), {}, m.History(30, 0.006, 0.20)))
+    assert "moved 0.60% in the direction the post pointed" in fell
+    rose = history_line(m.heads_up(bearish, set(), {}, m.History(30, -0.006, 0.20)))
+    assert "moved 0.60% against the direction the post pointed" in rose
+    for line in (fell, rose):
+        assert "+0.60%" not in line and "-0.60%" not in line and "bullish/bearish posts" in line
+
+
+def test_history_line_small_untested_and_missing():
+    # n_posts counts only bullish/bearish posts with a CAR; None means no study row or a failed study run.
+    few = history_line(m.heads_up(post(), set(), {}, m.History(6, 0.01, None)))
+    assert few == "History: fewer than 10 past bullish/bearish posts by realDonaldTrump with price data."
+    untested = history_line(m.heads_up(post(), set(), {}, m.History(12, 0.004, None)))
+    assert "the stocks moved 0.40% in the direction the post pointed" in untested
+    assert untested.endswith("(n=12, no p-value).") and "fewer than" not in untested
+    missing = history_line(m.heads_up(post(), set(), {}, None))
+    assert missing == "History: no study numbers available for realDonaldTrump."
 
 
 def test_follow_60m_lines():

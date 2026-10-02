@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from influence_tracker import db
 from influence_tracker.alerts import watch
 from influence_tracker.alerts.keepawake import ES_CONTINUOUS, ES_SYSTEM_REQUIRED, KeepAwake
@@ -20,6 +22,20 @@ class Clock:
 
     def sleep(self, seconds: float) -> None:
         self.t += timedelta(seconds=seconds)
+
+
+class SuspendingClock(Clock):
+    """Models Windows 8+ relative timers (time.sleep): a sleep that spans the suspend stops counting until resume."""
+
+    def __init__(self, t: datetime, suspend: datetime, resume: datetime) -> None:
+        super().__init__(t)
+        self.suspend, self.resume = suspend.astimezone(UTC), resume.astimezone(UTC)
+
+    def sleep(self, seconds: float) -> None:
+        end = self.t + timedelta(seconds=seconds)
+        if self.t < self.suspend <= end:
+            end += self.resume - self.suspend
+        self.t = end
 
 
 def steps(clock, calls, *, x=False, fail_collect=False):
@@ -88,3 +104,25 @@ def test_x_is_polled_at_its_own_interval(conn, watchlist):
     watch.run_watch(conn, watchlist, s, run_id=1, max_cycles=4)  # 10:31, 10:35, 10:40, 10:45
     x_times = [t for n, t in calls if n == "x"]
     assert [t.astimezone(NY).strftime("%H:%M") for t in x_times] == ["10:31"]  # next X poll is due at 10:46
+
+
+@pytest.mark.parametrize(
+    ("start", "suspend", "resume"),
+    [
+        # Review Focus night: idle 20:30 cycle, PC sleeps mid-wait, woken at 07:00 on a session day
+        (
+            datetime(2026, 9, 29, 20, 30, tzinfo=NY),
+            datetime(2026, 9, 29, 20, 45, 20, tzinfo=NY),
+            datetime(2026, 9, 30, 7, 0, tzinfo=NY),
+        ),
+        # laptop lid closed during the active window
+        (ACTIVE, datetime(2026, 9, 29, 10, 32, 30, tzinfo=NY), datetime(2026, 9, 29, 11, 0, tzinfo=NY)),
+    ],
+)
+def test_a_suspend_mid_wait_does_not_delay_the_first_cycle_after_resume(conn, watchlist, start, suspend, resume):
+    clock, calls = SuspendingClock(start, suspend, resume), []
+    s, _ = steps(clock, calls)
+    watch.run_watch(conn, watchlist, s, run_id=1, max_cycles=3)
+    starts = [t for n, t in calls if n == "ts"]
+    assert resume <= starts[1] <= resume + timedelta(seconds=watch.SLEEP_SLICE)  # not the rest of the old wait
+    assert starts[2] == resume + timedelta(minutes=5)  # back on the aligned 5-minute ticks

@@ -16,6 +16,9 @@ log = logging.getLogger(__name__)
 
 HEARTBEAT_SOURCE, HEARTBEAT_KEY = "watch", "heartbeat"
 HEARTBEAT_FRESH = timedelta(minutes=15)
+# Windows 8+ relative timers (time.sleep) stop counting while the PC is suspended, so a single long sleep would
+# run on past a resume; waiting in slices and re-reading the wall clock bounds that lag to one slice.
+SLEEP_SLICE = 60.0
 
 
 def heartbeat_fresh(conn: sqlite3.Connection, now: datetime) -> bool:
@@ -74,6 +77,7 @@ def run_watch(
             if once or (max_cycles is not None and cycles >= max_cycles):
                 return 0
             wake = timing.next_cycle(steps.clock(), cfg)
-            steps.sleep(max(1.0, (wake - steps.clock()).total_seconds()))
+            while (left := (wake - steps.clock()).total_seconds()) > 0:
+                steps.sleep(min(SLEEP_SLICE, max(1.0, left)))
     finally:
         steps.keep_awake.release()

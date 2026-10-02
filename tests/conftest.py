@@ -30,6 +30,16 @@ def conn(tmp_path):
 
 
 @pytest.fixture
+def no_ntfy_env(monkeypatch) -> None:
+    """No ntfy settings in the environment for this test, and none left behind by it."""
+    for name in ("NTFY_TOPIC", "NTFY_SERVER"):
+        # load_dotenv writes straight into os.environ, and delenv on an absent name records nothing to undo;
+        # setenv first registers the name, so teardown also removes a value a loaded .env wrote.
+        monkeypatch.setenv(name, "")
+        monkeypatch.delenv(name)
+
+
+@pytest.fixture
 def fixed_now() -> datetime:
     # Thursday 2026-09-24 22:30 UTC = 18:30 New York (EDT), after the extended session.
     return datetime(2026, 9, 24, 22, 30, tzinfo=UTC)

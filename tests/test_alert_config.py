@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 import pytest
 import yaml
 from pydantic import ValidationError
@@ -36,15 +38,20 @@ def test_unknown_holding_is_a_config_error():
         Watchlist.model_validate(raw)
 
 
-def test_settings_read_ntfy_from_env(tmp_path, monkeypatch):
-    monkeypatch.delenv("NTFY_TOPIC", raising=False)
-    monkeypatch.delenv("NTFY_SERVER", raising=False)
+def test_settings_read_ntfy_from_env(tmp_path, no_ntfy_env):
     (tmp_path / ".env").write_text("NTFY_TOPIC=influence-abc123\n", encoding="utf-8")
     s = load_settings(tmp_path)
     assert s.ntfy_topic == "influence-abc123"
     assert s.ntfy_server == "https://ntfy.sh"
 
 
-def test_settings_without_topic(tmp_path, monkeypatch):
-    monkeypatch.delenv("NTFY_TOPIC", raising=False)
+def test_settings_without_topic(tmp_path, no_ntfy_env):
     assert load_settings(tmp_path).ntfy_topic is None
+
+
+def test_a_topic_loaded_from_env_file_does_not_outlive_the_test(tmp_path, monkeypatch, no_ntfy_env):
+    (tmp_path / ".env").write_text("NTFY_TOPIC=influence-abc123\n", encoding="utf-8")
+    load_settings(tmp_path)
+    assert os.environ["NTFY_TOPIC"] == "influence-abc123"  # load_dotenv writes straight into os.environ
+    monkeypatch.undo()  # what teardown does
+    assert os.environ.get("NTFY_TOPIC") != "influence-abc123"

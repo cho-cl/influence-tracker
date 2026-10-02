@@ -13,6 +13,7 @@ from .live import PriceSource
 from .messages import D1Row, Follow60Row, et
 from .timing import FollowWindow
 
+ALERT_PLATFORMS = ("truthsocial", "x")
 MAX_TICKERS = 5
 MAX_BAR_GAP = timedelta(minutes=15)
 D1_GIVE_UP = timedelta(days=7)
@@ -78,11 +79,15 @@ def confounders(conn: sqlite3.Connection, platform: str, native_id: str, ticker:
     ).fetchone()
     if split is not None:
         notes.append(SPLIT)
-    ev = conn.execute(
-        "SELECT clustered FROM events WHERE platform = ? AND native_id = ? AND ticker = ?",
-        (platform, native_id, ticker),
+    # Not events.clustered: the study's flag spares the session's first post, but CAR[0,+1] is the same for every post
+    # in the session, so each is confounded by the others. Reddit chatter is not "another post" the reader tracks.
+    plats = ",".join("?" * len(ALERT_PLATFORMS))
+    other = conn.execute(
+        f"""SELECT 1 FROM events WHERE ticker = ? AND d0 = ? AND platform IN ({plats})
+              AND NOT (platform = ? AND native_id = ?) LIMIT 1""",
+        (ticker, d0.isoformat(), *ALERT_PLATFORMS, platform, native_id),
     ).fetchone()
-    if ev is not None and ev["clustered"]:
+    if other is not None:
         notes.append(f"another post about {ticker} in the same session")
     return tuple(notes)
 

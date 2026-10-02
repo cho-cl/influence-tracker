@@ -13,13 +13,13 @@ from ..analysis.metrics import EventModel, compute_study, event_model
 from ..config import Watchlist
 from ..timeutil import NY, from_iso, to_iso
 from . import followups, messages, timing
+from .followups import ALERT_PLATFORMS
 from .live import PriceSource
 from .messages import History, PostInfo
 from .notify import Notifier, NotifyError
 
 log = logging.getLogger(__name__)
 
-ALERT_PLATFORMS = ("truthsocial", "x")
 RETRY_FOR = timedelta(hours=24)
 PRICE_LOOKBACK = timedelta(days=4)
 INIT_SOURCE, INIT_KEY = "alerts", "initialized"
@@ -252,7 +252,8 @@ class AlertEngine:
         self._deliver(row, msg, now, counts)
 
     def _follow_d1(self, row: sqlite3.Row, now: datetime, counts: dict) -> None:
-        if now > from_iso(row["due_at"]) + followups.D1_GIVE_UP:
+        # Only a row still waiting for bars gives up; a failed send keeps its 24 h of retries from the first failure.
+        if row["status"] == "pending" and now > from_iso(row["due_at"]) + followups.D1_GIVE_UP:
             self._skip(row, now, "gave up: daily bars never arrived", counts)
             return
         info, d0 = self._post(row)

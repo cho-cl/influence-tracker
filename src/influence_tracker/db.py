@@ -209,6 +209,7 @@ CREATE TABLE IF NOT EXISTS alerts (
     error TEXT,
     created_at TEXT NOT NULL,
     sent_at TEXT,
+    first_failed_at TEXT,         -- UTC ISO; the 24 h retry period runs from here, as a follow_d1 can be days late
     UNIQUE (kind, platform, native_id)
 );
 CREATE INDEX IF NOT EXISTS alerts_due ON alerts (status, due_at);
@@ -449,10 +450,11 @@ def alert_status(conn: sqlite3.Connection, kind: str, platform: str, native_id: 
 
 
 def due_alerts(conn: sqlite3.Connection, now: datetime, retry_for: timedelta) -> list[sqlite3.Row]:
-    """Pending rows that are due, plus failed rows still inside the retry period, oldest due first."""
+    """Pending rows that are due, plus failed rows still inside the retry period (counted from the first failure),
+    oldest due first."""
     return conn.execute(
         """SELECT * FROM alerts
-           WHERE due_at <= ? AND (status = 'pending' OR (status = 'failed' AND due_at > ?))
+           WHERE due_at <= ? AND (status = 'pending' OR (status = 'failed' AND COALESCE(first_failed_at, due_at) > ?))
            ORDER BY due_at, id""",
         (to_iso(now), to_iso(now - retry_for)),
     ).fetchall()
@@ -472,9 +474,10 @@ def mark_alert(
         """UPDATE alerts SET status = ?,
              attempts = attempts + CASE WHEN ? IN ('sent', 'failed') THEN 1 ELSE 0 END,
              title = COALESCE(?, title), message = COALESCE(?, message), error = COALESCE(?, error),
-             sent_at = CASE WHEN ? = 'sent' THEN ? ELSE sent_at END
+             sent_at = CASE WHEN ? = 'sent' THEN ? ELSE sent_at END,
+             first_failed_at = CASE WHEN ? = 'failed' THEN COALESCE(first_failed_at, ?) ELSE first_failed_at END
            WHERE id = ?""",
-        (status, status, title, message, error, status, to_iso(when), alert_id),
+        (status, status, title, message, error, status, to_iso(when), status, to_iso(when), alert_id),
     )
 
 

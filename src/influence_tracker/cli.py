@@ -10,6 +10,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import yaml
 from pydantic import ValidationError
@@ -21,12 +22,21 @@ from .logsetup import force_utf8_stdio, setup_logging
 from .status import PLATFORMS, format_counts, show_status
 from .timeutil import NY, utc_now
 
+if TYPE_CHECKING:
+    from .alerts.notify import Notifier
+    from .alerts.watch import Steps
+
 log = logging.getLogger(__name__)
 
 ROOT_ENV_VAR = "INFLUENCE_TRACKER_ROOT"
 COLLECTORS = ("truthsocial", "reddit", "apewisdom", "x")
 COLLECTOR_STATUSES = ("ok", "partial", "error")
 X_TOKEN_MISSING = "X_BEARER_TOKEN not set in .env"
+WATCH_ALIVE = "live watch is running"
+# The platforms `influence watch` collects; the nightly run leaves them to it while its heartbeat is fresh.
+WATCH_PLATFORMS = ("truthsocial", "x")
+TOPIC_PREFIX = "influence-"
+NO_TOPIC = "NTFY_TOPIC is not set: run `influence alerts setup` first"
 
 Clock = Callable[[], datetime]
 StageFn = Callable[[int, datetime], object]
@@ -68,6 +78,9 @@ class Pipeline:
         sink, setup_error = self._prepare_sink()
         for name in COLLECTORS:
             if only and name not in only:
+                continue
+            if name in WATCH_PLATFORMS and _watch_alive(self.conn, self.clock()):
+                self._skip(f"collect:{name}", WATCH_ALIVE)
                 continue
             if name == "x" and not self.settings.x_bearer_token:
                 self._skip("collect:x", X_TOKEN_MISSING)
@@ -205,6 +218,12 @@ def _require(sink: ingest.PostSink | None, setup_error: Exception | None) -> ing
     return sink
 
 
+def _watch_alive(conn: sqlite3.Connection, now: datetime) -> bool:
+    from .alerts.watch import heartbeat_fresh
+
+    return heartbeat_fresh(conn, now)
+
+
 def _rollback(conn: sqlite3.Connection) -> None:
     # A stage that died mid-transaction must not have its half-written page committed by finish_run.
     if conn.in_transaction:
@@ -316,6 +335,11 @@ def build_parser() -> argparse.ArgumentParser:
     backfill = sub.add_parser("backfill", help="one-time, slow history backfill (resumable)")
     backfill.add_argument("source", choices=["truthsocial"])
     backfill.add_argument("--since", required=True, type=_iso_date, metavar="YYYY-MM-DD")
+    watch = sub.add_parser("watch", help="live alerts: check for new stock posts every few minutes and notify phones")
+    watch.add_argument("--once", action="store_true", help="run a single cycle and exit")
+    watch.add_argument("--dry-run", action="store_true", help="print alerts instead of sending them")
+    alerts = sub.add_parser("alerts", help="phone alert setup: generate an ntfy topic or send a test notification")
+    alerts.add_argument("action", choices=["setup", "test"])
     return parser
 
 
@@ -377,6 +401,8 @@ def _dispatch(
         return 0
     if args.command == "events":
         return _events(args, watchlist, conn)
+    if args.command == "alerts":
+        return _alerts(args, settings)
 
     if args.command == "backfill" and args.since > clock().astimezone(NY).date():
         print(f"--since {args.since} is in the future", file=sys.stderr)
@@ -386,6 +412,8 @@ def _dispatch(
         return 2
 
     log.info("influence %s (root %s)", args.command, settings.root)
+    if args.command == "watch":
+        return _watch(args, settings, watchlist, conn, clock)
     pipeline = Pipeline(settings, watchlist, conn, clock)
     analysis: Analysis | None = None
     if args.command == "collect":
@@ -482,6 +510,142 @@ def _events(args: argparse.Namespace, watchlist: Watchlist, conn: sqlite3.Connec
         return 0
     eventsview.show_events(conn, flt, args.limit or eventsview.DEFAULT_LIMIT, eventsview.events_console())
     return 0
+
+
+# ---------------------------------------------------------------- live alerts
+
+
+def _make_notifier(settings: Settings, dry_run: bool) -> Notifier:
+    from .alerts.notify import DryRunNotifier, NtfyNotifier
+
+    if dry_run:
+        return DryRunNotifier()
+    if not settings.ntfy_topic:  # callers check first and exit 2; this only keeps a None topic from being used
+        raise RuntimeError(NO_TOPIC)
+    return NtfyNotifier(settings.ntfy_server, settings.ntfy_topic)
+
+
+def _alerts(args: argparse.Namespace, settings: Settings) -> int:
+    if args.action == "setup":
+        return _alerts_setup(settings)
+    if not settings.ntfy_topic:
+        print(NO_TOPIC, file=sys.stderr)
+        return 2
+    from .alerts.notify import Message, NotifyError
+
+    message = Message(
+        "influence-tracker test alert", "If you can read this, phone alerts work.", 3, ("white_check_mark",)
+    )
+    try:
+        _make_notifier(settings, dry_run=False).send(message)
+    except NotifyError as e:
+        print(f"Test alert failed: {e}", file=sys.stderr)
+        return 1
+    print("Test alert sent.")
+    return 0
+
+
+def _alerts_setup(settings: Settings) -> int:
+    env = settings.root / ".env"
+    if settings.ntfy_topic:
+        topic = settings.ntfy_topic
+        print(f"Already set up: NTFY_TOPIC={topic} in {env}")
+    else:
+        import secrets
+
+        # 16 random bytes are 22 URL-safe characters: a 32-character topic in the characters ntfy allows.
+        topic = TOPIC_PREFIX + secrets.token_urlsafe(16)
+        existing = env.read_text(encoding="utf-8") if env.exists() else ""
+        lines = [ln for ln in existing.splitlines() if not ln.startswith("NTFY_TOPIC=")]
+        lines.append(f"NTFY_TOPIC={topic}")
+        env.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        print(f"Created NTFY_TOPIC in {env}")
+    print(
+        "\nOn each phone: install the free 'ntfy' app (App Store / Google Play), tap +, and subscribe to topic\n"
+        f"    {topic}\n"
+        f"on server {settings.ntfy_server}. The topic works like a password: share it only with your team.\n"
+        "Then run: influence alerts test"
+    )
+    return 0
+
+
+def _watch_steps(
+    settings: Settings, watchlist: Watchlist, conn: sqlite3.Connection, clock: Clock, *, dry_run: bool
+) -> Steps:
+    import time
+
+    from . import events, sentiment
+    from .alerts.engine import AlertEngine, StudyHistory
+    from .alerts.keepawake import KeepAwake
+    from .alerts.live import LivePrices
+    from .alerts.watch import Steps
+    from .collectors.truthsocial import collect_truthsocial
+    from .collectors.x import collect_x
+
+    pipeline = Pipeline(settings, watchlist, conn, clock)
+    loaded: dict = {}
+
+    def sink() -> ingest.PostSink:
+        # Prepared on first use and retried every cycle until it works: one failure at startup must not leave a
+        # long-running watch unable to store posts.
+        if "sink" not in loaded:
+            loaded["sink"] = _require(*pipeline._prepare_sink())
+        return loaded["sink"]
+
+    def classifier(texts: Sequence[str]) -> list[tuple[str, float]]:
+        # Loaded once and kept in memory; a failed load raises, and the next cycle tries again.
+        if "clf" not in loaded:
+            loaded["clf"] = sentiment.load_classifier(watchlist.sentiment.model_id, watchlist.sentiment.batch_size)
+        return loaded["clf"](texts)
+
+    def collect_x_step(run_id: int, now: datetime) -> dict:
+        return collect_x(conn, watchlist, settings.x_bearer_token, sink(), run_id, now)
+
+    engine = AlertEngine(
+        conn,
+        watchlist,
+        _make_notifier(settings, dry_run),
+        live_factory=lambda: LivePrices(watchlist),
+        history_factory=lambda now: StudyHistory(conn, watchlist, now),
+    )
+    return Steps(
+        clock=clock,
+        sleep=time.sleep,
+        collect_truthsocial=lambda run_id, now: collect_truthsocial(conn, watchlist, sink(), run_id, now),
+        collect_x=collect_x_step if settings.x_bearer_token else None,
+        classify=lambda run_id, now: sentiment.classify_posts(conn, watchlist, run_id, now, classifier=classifier),
+        sync_events=lambda now: events.sync_events(conn, watchlist, now),
+        alerts=engine.run,
+        keep_awake=KeepAwake(),
+    )
+
+
+def _watch(
+    args: argparse.Namespace, settings: Settings, watchlist: Watchlist, conn: sqlite3.Connection, clock: Clock
+) -> int:
+    if not watchlist.alerts.enabled:
+        print(f"alerts.enabled is false in {settings.config_path}", file=sys.stderr)
+        return 2
+    if not args.dry_run and not settings.ntfy_topic:
+        print(NO_TOPIC, file=sys.stderr)
+        return 2
+    from .alerts import watch
+
+    run_id = db.start_run(conn, "watch", clock())
+    status, error = "ok", None
+    try:
+        steps = _watch_steps(settings, watchlist, conn, clock, dry_run=args.dry_run)
+        return watch.run_watch(conn, watchlist, steps, run_id, once=args.once)
+    except KeyboardInterrupt:
+        _rollback(conn)
+        log.info("influence watch stopped (Ctrl+C)")
+        return 0
+    except Exception as e:
+        _rollback(conn)
+        status, error = "error", f"{type(e).__name__}: {e}"
+        raise
+    finally:
+        db.finish_run(conn, run_id, status, {}, error, clock())
 
 
 if __name__ == "__main__":

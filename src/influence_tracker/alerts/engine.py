@@ -12,7 +12,7 @@ from .. import db, market
 from ..analysis.metrics import EventModel, compute_study, event_model
 from ..config import Watchlist
 from ..timeutil import NY, from_iso, to_iso
-from . import messages, timing
+from . import followups, messages, timing
 from .live import PriceSource
 from .messages import History, PostInfo
 from .notify import Notifier, NotifyError
@@ -203,6 +203,10 @@ class AlertEngine:
                 self._deliver(row, digest, now, counts)
             elif kind == "heads_up":
                 self._deliver(row, self._heads_up(row, live, history), now, counts)
+            elif kind == "follow_60m":
+                self._follow_60m(row, live, now, counts)
+            elif kind == "follow_d1":
+                self._follow_d1(row, now, counts)
         return counts
 
     def _heads_up(self, row: sqlite3.Row, live: PriceSource, history: HistoryLookup) -> messages.Message:
@@ -218,6 +222,48 @@ class AlertEngine:
                 info.created_at
             )
         return messages.heads_up(info, self.holdings, prices, history(info.author))
+
+    def _post(self, row: sqlite3.Row) -> tuple[PostInfo, date]:
+        info = post_info(
+            self.conn,
+            row["platform"],
+            row["native_id"],
+            post_tickers(self.conn, row["platform"], row["native_id"], self.symbols),
+        )
+        return info, market.event_session(info.created_at)
+
+    def _skip(self, row: sqlite3.Row, now: datetime, reason: str, counts: dict) -> None:
+        with self.conn:
+            db.mark_alert(self.conn, row["id"], "skipped", now, error=reason)
+        counts["skipped"] += 1
+
+    def _follow_60m(self, row: sqlite3.Row, live: PriceSource, now: datetime, counts: dict) -> None:
+        if row["status"] == "pending" and now > from_iso(row["due_at"]) + timing.STALE_AFTER:
+            self._skip(row, now, "stale: PC off or prices unavailable", counts)
+            return
+        info, d0 = self._post(row)
+        ordered = tuple(messages.order_tickers(info.tickers, self.holdings))
+        window = timing.follow_window(info.created_at, d0, self.cfg.followup_minutes)
+        rows = followups.follow_60m_rows(ordered, window, live, lambda t: self.model(t, d0))
+        if rows is None:
+            counts["waiting"] += 1
+            return
+        msg = messages.follow_60m(info, self.holdings, rows, followups.window_text(window, d0))
+        self._deliver(row, msg, now, counts)
+
+    def _follow_d1(self, row: sqlite3.Row, now: datetime, counts: dict) -> None:
+        if now > from_iso(row["due_at"]) + followups.D1_GIVE_UP:
+            self._skip(row, now, "gave up: daily bars never arrived", counts)
+            return
+        info, d0 = self._post(row)
+        ordered = tuple(messages.order_tickers(info.tickers, self.holdings))
+        rows = followups.follow_d1_rows(
+            self.conn, row["platform"], row["native_id"], ordered, d0, lambda t: self.model(t, d0)
+        )
+        if rows is None:
+            counts["waiting"] += 1
+            return
+        self._deliver(row, messages.follow_d1(info, self.holdings, rows), now, counts)
 
     def _deliver(self, row: sqlite3.Row, message: messages.Message, now: datetime, counts: dict) -> None:
         try:

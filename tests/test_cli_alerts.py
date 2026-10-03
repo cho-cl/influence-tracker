@@ -124,7 +124,7 @@ def test_watch_once_dry_run_wires_every_step(root, monkeypatch):
     monkeypatch.setattr(
         watch_mod,
         "run_watch",
-        lambda conn, wl, steps, run_id, once, max_cycles=None: ran.append((steps, once)) or 0,
+        lambda conn, wl, steps, run_id, once, max_cycles=None, reload=None: ran.append((steps, once)) or 0,
     )
     assert cli.main(["watch", "--once", "--dry-run"]) == 0
     assert called and called[0]["dry_run"] is True
@@ -150,6 +150,36 @@ def test_watch_refuses_when_alerts_are_disabled(root, capsys):
     assert _runs(root) == []
 
 
+def test_a_second_watch_refuses_to_start(root, monkeypatch, capsys):
+    monkeypatch.setattr(cli, "_watch_steps", lambda *a, **k: pytest.fail("a second watch must not build steps"))
+    with watch_mod.single_instance(root / "data" / cli.WATCH_LOCK) as mine:
+        assert mine
+        assert cli.main(["watch", "--once", "--dry-run"]) == 2
+    assert cli.WATCH_RUNNING in capsys.readouterr().err
+    assert _runs(root) == []
+
+
+def test_watch_setup_reloads_an_edited_watchlist(root, monkeypatch):
+    monkeypatch.setattr(cli, "_watch_steps", lambda settings, wl, *a, **k: ("steps", tuple(wl.alerts.holdings)))
+    settings = load_settings(root)
+    conn = db.connect(settings.db_path)
+    setup = cli._WatchSetup(settings, cli.load_watchlist(settings.config_path), conn, cli.utc_now, dry_run=True)
+    assert setup.reload() is None  # nothing changed
+
+    raw = yaml.safe_load(settings.config_path.read_text(encoding="utf-8"))
+    raw["alerts"]["holdings"] = ["NVDA"]
+    settings.config_path.write_text(yaml.safe_dump(raw, allow_unicode=True), encoding="utf-8")
+    watchlist, steps = setup.reload()
+    assert watchlist.alerts.holdings == ["NVDA"] and steps == ("steps", ("NVDA",))
+    assert setup.reload() is None
+
+    raw["alerts"]["enabled"] = False
+    settings.config_path.write_text(yaml.safe_dump(raw, allow_unicode=True), encoding="utf-8")
+    with pytest.raises(watch_mod.StopWatch, match="alerts.enabled is false"):
+        setup.reload()
+    conn.close()
+
+
 @pytest.mark.parametrize(
     ("raised", "code", "row"),
     [
@@ -173,8 +203,8 @@ def test_watch_steps_wire_the_real_stages(tmp_path, conn, watchlist, monkeypatch
     sink = object()
     prepared = iter([(None, RuntimeError("database is locked")), (sink, None)])
     monkeypatch.setattr(cli.Pipeline, "_prepare_sink", lambda self: next(prepared))
-    monkeypatch.setattr(truthsocial_mod, "collect_truthsocial", lambda *a: calls.append(("ts", a)) or {})
-    monkeypatch.setattr(x_mod, "collect_x", lambda *a: calls.append(("x", a)) or {})
+    monkeypatch.setattr(truthsocial_mod, "collect_truthsocial", lambda *a: calls.append(("ts", a)) or {"status": "ok"})
+    monkeypatch.setattr(x_mod, "collect_x", lambda *a: calls.append(("x", a)) or {"status": "ok"})
     monkeypatch.setattr(events, "sync_events", lambda *a: calls.append(("events", a)) or {})
 
     def load_classifier(model_id, batch_size):
@@ -191,15 +221,21 @@ def test_watch_steps_wire_the_real_stages(tmp_path, conn, watchlist, monkeypatch
 
     steps = cli._watch_steps(settings, watchlist, conn, cli.utc_now, dry_run=True)
 
-    with pytest.raises(RuntimeError, match="database is locked"):
-        steps.collect_truthsocial(7, NOW)
+    failed = steps.collect_truthsocial(7, NOW)  # recorded on its own runs row, not raised
+    assert failed["status"] == "error" and "database is locked" in failed["error"]
     steps.collect_truthsocial(7, NOW)  # a failed collect setup is retried on the next cycle
     steps.collect_x(7, NOW)
     assert steps.classify(7, NOW) == {"labels": [("neutral", 0.9), ("neutral", 0.9)]}
     steps.sync_events(NOW)
+    runs = conn.execute("SELECT id, stage, status FROM runs ORDER BY id").fetchall()
+    assert [(r["stage"], r["status"]) for r in runs] == [
+        ("collect:truthsocial", "error"),
+        ("collect:truthsocial", "ok"),
+        ("collect:x", "ok"),
+    ]
     assert calls == [
-        ("ts", (conn, watchlist, sink, 7, NOW)),
-        ("x", (conn, watchlist, "tok", sink, 7, NOW)),
+        ("ts", (conn, watchlist, sink, runs[1]["id"], NOW)),
+        ("x", (conn, watchlist, "tok", sink, runs[2]["id"], NOW)),
         ("classify", (conn, watchlist, 7, NOW)),
         ("events", (conn, watchlist, NOW)),
     ]
@@ -217,23 +253,32 @@ def test_watch_steps_wire_the_real_stages(tmp_path, conn, watchlist, monkeypatch
 
 
 @pytest.mark.parametrize(
-    ("heartbeat_age", "expected"),
+    ("heartbeat_age", "platforms", "expected"),
     [
         (
             timedelta(minutes=14),
+            "truthsocial,x",
             {"truthsocial": ("skipped", "live watch is running"), "x": ("skipped", "live watch is running")},
         ),
         (
+            # A watch started without an X token leaves X to the nightly run.
+            timedelta(minutes=14),
+            "truthsocial",
+            {"truthsocial": ("skipped", "live watch is running"), "x": ("skipped", "X_BEARER_TOKEN not set in .env")},
+        ),
+        (
             timedelta(minutes=15),
+            "truthsocial,x",
             {"truthsocial": ("ok", None), "x": ("skipped", "X_BEARER_TOKEN not set in .env")},
         ),
     ],
-    ids=["watch-alive", "watch-stale"],
+    ids=["watch-alive", "watch-alive-without-x", "watch-stale"],
 )
-def test_collect_steps_aside_while_watch_is_alive(root, monkeypatch, heartbeat_age, expected):
+def test_collect_steps_aside_while_watch_is_alive(root, monkeypatch, heartbeat_age, platforms, expected):
     conn = db.connect(root / "data" / "tracker.db")
     with conn:
         db.set_watermark(conn, "watch", "heartbeat", to_iso(NOW - heartbeat_age), NOW)
+        db.set_watermark(conn, "watch", "platforms", platforms, NOW)
     conn.close()
     ran = []
     monkeypatch.setattr(

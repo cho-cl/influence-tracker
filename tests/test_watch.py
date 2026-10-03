@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import subprocess
+import sys
+import time
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -126,3 +129,100 @@ def test_a_suspend_mid_wait_does_not_delay_the_first_cycle_after_resume(conn, wa
     starts = [t for n, t in calls if n == "ts"]
     assert resume <= starts[1] <= resume + timedelta(seconds=watch.SLEEP_SLICE)  # not the rest of the old wait
     assert starts[2] == resume + timedelta(minutes=5)  # back on the aligned 5-minute ticks
+
+
+@pytest.mark.parametrize(("x", "platforms"), [(False, {"truthsocial"}), (True, {"truthsocial", "x"})])
+def test_each_heartbeat_records_the_platforms_the_watch_collects(conn, watchlist, x, platforms):
+    clock, calls = Clock(ACTIVE), []
+    s, _ = steps(clock, calls, x=x)
+    watch.run_watch(conn, watchlist, s, run_id=1, once=True)
+    assert watch.live_platforms(conn, clock()) == platforms
+    assert watch.live_platforms(conn, clock() + watch.HEARTBEAT_FRESH) == frozenset()  # stale: the watch is gone
+
+
+def test_a_heartbeat_without_platforms_counts_as_truthsocial_only(conn):
+    now = ACTIVE.astimezone(UTC)
+    with conn:
+        db.set_watermark(conn, "watch", "heartbeat", "2026-09-29T14:30:00Z", now)
+    assert watch.live_platforms(conn, now) == {"truthsocial"}
+
+
+def test_a_reload_swaps_config_and_steps_between_cycles(conn, watchlist):
+    clock, old_calls, new_calls = Clock(ACTIVE), [], []
+    old, _ = steps(clock, old_calls)
+    new, _ = steps(clock, new_calls, x=True)
+    slower = watchlist.model_copy(update={"alerts": watchlist.alerts.model_copy(update={"poll_active_minutes": 15})})
+    reloads = []
+
+    def reload():
+        reloads.append(clock())
+        return (slower, new) if len(reloads) == 1 else None
+
+    watch.run_watch(conn, watchlist, old, run_id=1, max_cycles=3, reload=reload)
+    assert len(reloads) == 2  # before cycles 2 and 3; the first runs on the config the watch started with
+    assert [n for n, _ in old_calls] == ["ts", "classify", "sync", "alerts"]
+    assert [n for n, _ in new_calls] == ["ts", "x", "classify", "sync", "alerts", "ts", "classify", "sync", "alerts"]
+    starts = [t.astimezone(NY).strftime("%H:%M") for n, t in old_calls + new_calls if n == "ts"]
+    assert starts == ["10:31", "10:35", "10:45"]  # 5-minute ticks, then the reloaded 15-minute cadence
+    assert db.get_watermark(conn, "watch", "platforms") == "truthsocial,x"
+
+
+def test_a_failing_reload_keeps_the_current_steps(conn, watchlist):
+    clock, calls = Clock(ACTIVE), []
+    s, _ = steps(clock, calls)
+
+    def reload():
+        raise RuntimeError("cannot read config")
+
+    assert watch.run_watch(conn, watchlist, s, run_id=1, max_cycles=2, reload=reload) == 0
+    assert [n for n, _ in calls] == ["ts", "classify", "sync", "alerts"] * 2
+
+
+def test_a_reload_can_stop_the_watch(conn, watchlist):
+    clock, calls = Clock(ACTIVE), []
+    s, states = steps(clock, calls)
+
+    def reload():
+        raise watch.StopWatch("alerts.enabled is false")
+
+    with pytest.raises(watch.StopWatch, match="alerts.enabled is false"):
+        watch.run_watch(conn, watchlist, s, run_id=1, max_cycles=5, reload=reload)
+    assert [n for n, _ in calls] == ["ts", "classify", "sync", "alerts"]
+    assert states[-1] == ES_CONTINUOUS  # the PC may sleep again
+
+
+def test_single_instance_lock_is_exclusive_until_released(tmp_path):
+    path = tmp_path / "data" / "watch.lock"
+    with watch.single_instance(path) as first, watch.single_instance(path) as second:
+        assert (first, second) == (True, False)
+    with pytest.raises(RuntimeError), watch.single_instance(path) as mine:
+        assert mine
+        raise RuntimeError("crash")
+    with watch.single_instance(path) as again:
+        assert again
+
+
+def test_the_os_releases_the_lock_when_its_process_dies(tmp_path):
+    path = tmp_path / "watch.lock"
+    code = (
+        "import pathlib, sys, time\n"
+        "from influence_tracker.alerts.watch import single_instance\n"
+        "with single_instance(pathlib.Path(sys.argv[1])) as mine:\n"
+        "    print(mine, flush=True)\n"
+        "    time.sleep(300)\n"
+    )
+    proc = subprocess.Popen([sys.executable, "-c", code, str(path)], stdout=subprocess.PIPE, text=True)
+    try:
+        assert proc.stdout.readline().strip() == "True"
+        with watch.single_instance(path) as mine:
+            assert mine is False
+    finally:
+        proc.kill()  # no clean exit: nothing in the child unlocks the file
+        proc.wait(timeout=60)
+    # Windows frees a dead process's locks "depending upon available system resources", so allow it a moment.
+    for _ in range(100):
+        with watch.single_instance(path) as mine:
+            if mine:
+                break
+        time.sleep(0.1)
+    assert mine

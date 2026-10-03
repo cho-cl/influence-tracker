@@ -33,10 +33,11 @@ COLLECTORS = ("truthsocial", "reddit", "apewisdom", "x")
 COLLECTOR_STATUSES = ("ok", "partial", "error")
 X_TOKEN_MISSING = "X_BEARER_TOKEN not set in .env"
 WATCH_ALIVE = "live watch is running"
-# The platforms `influence watch` collects; the nightly run leaves them to it while its heartbeat is fresh.
-WATCH_PLATFORMS = ("truthsocial", "x")
+WATCH_LOCK = "watch.lock"
+WATCH_RUNNING = "another influence watch is already running"
 TOPIC_PREFIX = "influence-"
 NO_TOPIC = "NTFY_TOPIC is not set: run `influence alerts setup` first"
+CONFIG_ERRORS = (OSError, UnicodeDecodeError, yaml.YAMLError, ValidationError)
 
 Clock = Callable[[], datetime]
 StageFn = Callable[[int, datetime], object]
@@ -79,7 +80,8 @@ class Pipeline:
         for name in COLLECTORS:
             if only and name not in only:
                 continue
-            if name in WATCH_PLATFORMS and _watch_alive(self.conn, self.clock()):
+            # Only what the live watch collects: one started without an X token must not leave X to nobody.
+            if name in _watched_platforms(self.conn, self.clock()):
                 self._skip(f"collect:{name}", WATCH_ALIVE)
                 continue
             if name == "x" and not self.settings.x_bearer_token:
@@ -178,17 +180,7 @@ class Pipeline:
         return run
 
     def _stage(self, stage: str, fn: StageFn) -> None:
-        started = self.clock()
-        run_id = db.start_run(self.conn, stage, started)
-        status, counts, error = "error", {}, None
-        try:
-            status, counts, error = _interpret(fn(run_id, started))
-        except Exception as e:
-            log.exception("%s raised", stage)
-            _rollback(self.conn)
-            error = f"{type(e).__name__}: {e}"
-        db.finish_run(self.conn, run_id, status, counts, error, self.clock())
-        self._record(StageResult(stage, status, counts, error))
+        self._record(_run_stage(self.conn, self.clock, stage, fn))
 
     def _skip(self, stage: str, reason: str) -> None:
         now = self.clock()
@@ -218,10 +210,27 @@ def _require(sink: ingest.PostSink | None, setup_error: Exception | None) -> ing
     return sink
 
 
-def _watch_alive(conn: sqlite3.Connection, now: datetime) -> bool:
-    from .alerts.watch import heartbeat_fresh
+def _run_stage(
+    conn: sqlite3.Connection, clock: Clock, stage: str, fn: StageFn, started: datetime | None = None
+) -> StageResult:
+    """Runs one stage under its own runs row; a failure is logged and recorded, never raised."""
+    started = started or clock()
+    run_id = db.start_run(conn, stage, started)
+    status, counts, error = "error", {}, None
+    try:
+        status, counts, error = _interpret(fn(run_id, started))
+    except Exception as e:
+        log.exception("%s raised", stage)
+        _rollback(conn)
+        error = f"{type(e).__name__}: {e}"
+    db.finish_run(conn, run_id, status, counts, error, clock())
+    return StageResult(stage, status, counts, error)
 
-    return heartbeat_fresh(conn, now)
+
+def _watched_platforms(conn: sqlite3.Connection, now: datetime) -> frozenset[str]:
+    from .alerts.watch import live_platforms
+
+    return live_platforms(conn, now)
 
 
 def _rollback(conn: sqlite3.Connection) -> None:
@@ -373,7 +382,7 @@ def main(argv: list[str] | None = None) -> int:
     setup_logging(settings.logs_dir)
     try:
         watchlist = load_watchlist(settings.config_path)
-    except (OSError, UnicodeDecodeError, yaml.YAMLError, ValidationError) as e:
+    except CONFIG_ERRORS as e:
         log.error("cannot load %s (%s)", settings.config_path, type(e).__name__)
         print(_config_error_message(settings.config_path, e), file=sys.stderr)
         return 2
@@ -569,8 +578,23 @@ def _alerts_setup(settings: Settings) -> int:
     return 0
 
 
+def _watch_refusal(settings: Settings, watchlist: Watchlist, dry_run: bool) -> str | None:
+    """Why the watch must not run with this config, or None."""
+    if not watchlist.alerts.enabled:
+        return f"alerts.enabled is false in {settings.config_path}"
+    if not dry_run and not settings.ntfy_topic:
+        return NO_TOPIC
+    return None
+
+
 def _watch_steps(
-    settings: Settings, watchlist: Watchlist, conn: sqlite3.Connection, clock: Clock, *, dry_run: bool
+    settings: Settings,
+    watchlist: Watchlist,
+    conn: sqlite3.Connection,
+    clock: Clock,
+    *,
+    dry_run: bool,
+    kept: dict | None = None,
 ) -> Steps:
     import time
 
@@ -582,6 +606,9 @@ def _watch_steps(
     from .collectors.truthsocial import collect_truthsocial
     from .collectors.x import collect_x
 
+    # `kept` outlives a config reload (the loaded model, the keep-awake state). Everything else is built from this
+    # watchlist, including the post sink's mention matcher.
+    kept = {} if kept is None else kept
     pipeline = Pipeline(settings, watchlist, conn, clock)
     loaded: dict = {}
 
@@ -592,15 +619,32 @@ def _watch_steps(
             loaded["sink"] = _require(*pipeline._prepare_sink())
         return loaded["sink"]
 
+    model = (watchlist.sentiment.model_id, watchlist.sentiment.batch_size)
+
     def classifier(texts: Sequence[str]) -> list[tuple[str, float]]:
         # Loaded once and kept in memory; a failed load raises, and the next cycle tries again.
-        if "clf" not in loaded:
-            loaded["clf"] = sentiment.load_classifier(watchlist.sentiment.model_id, watchlist.sentiment.batch_size)
-        return loaded["clf"](texts)
+        if kept.get("model") != model:
+            kept["clf"] = sentiment.load_classifier(*model)
+            kept["model"] = model
+        return kept["clf"](texts)
+
+    def recorded(stage: str, collect: StageFn) -> Callable[[int, datetime], dict]:
+        # Each collect gets its own runs row, as in the nightly run: `status` reads collect outcomes and Truth Social
+        # rate-limit hits from those rows, and while the watch runs the nightly only records "skipped".
+        def run(_watch_run_id: int, now: datetime) -> dict:
+            result = _run_stage(conn, clock, stage, collect, started=now)
+            return {**result.counts, "status": result.status, "error": result.error}
+
+        return run
+
+    def collect_ts_step(run_id: int, now: datetime) -> dict:
+        return collect_truthsocial(conn, watchlist, sink(), run_id, now)
 
     def collect_x_step(run_id: int, now: datetime) -> dict:
         return collect_x(conn, watchlist, settings.x_bearer_token, sink(), run_id, now)
 
+    if "keep_awake" not in kept:
+        kept["keep_awake"] = KeepAwake()
     engine = AlertEngine(
         conn,
         watchlist,
@@ -611,31 +655,133 @@ def _watch_steps(
     return Steps(
         clock=clock,
         sleep=time.sleep,
-        collect_truthsocial=lambda run_id, now: collect_truthsocial(conn, watchlist, sink(), run_id, now),
-        collect_x=collect_x_step if settings.x_bearer_token else None,
+        collect_truthsocial=recorded("collect:truthsocial", collect_ts_step),
+        collect_x=recorded("collect:x", collect_x_step) if settings.x_bearer_token else None,
         classify=lambda run_id, now: sentiment.classify_posts(conn, watchlist, run_id, now, classifier=classifier),
         sync_events=lambda now: events.sync_events(conn, watchlist, now),
         alerts=engine.run,
-        keep_awake=KeepAwake(),
+        keep_awake=kept["keep_awake"],
     )
+
+
+class _WatchSetup:
+    """The watch's settings, watchlist and steps, rebuilt between cycles after config/watchlist.yaml or .env changes.
+
+    The watch runs for weeks. With a stale ticker matcher, posts it stores after a ticker is added would never be
+    re-matched: the nightly run re-matches stored posts and records the new universe first. Holdings, the cadence
+    and an X token added later must reach it too."""
+
+    def __init__(
+        self, settings: Settings, watchlist: Watchlist, conn: sqlite3.Connection, clock: Clock, *, dry_run: bool
+    ) -> None:
+        self.settings, self.watchlist = settings, watchlist
+        self.conn, self.clock, self.dry_run = conn, clock, dry_run
+        self.env = _env_file_values(settings.root)
+        self.stamp = _config_stamp(settings)
+        self.kept: dict = {}
+        self.steps = _watch_steps(settings, watchlist, conn, clock, dry_run=dry_run, kept=self.kept)
+
+    def reload(self) -> tuple[Watchlist, Steps] | None:
+        """The new (watchlist, steps) when either file changed, else None. Raises StopWatch when the new config
+        switches alerts off or drops the ntfy topic."""
+        stamp = _config_stamp(self.settings)
+        if stamp == self.stamp:
+            return None
+        self.stamp = stamp  # a broken edit is reported once; the next save is tried again
+        self.env = _reapply_env(self.settings.root, self.env)
+        settings = load_settings(self.settings.root)
+        try:
+            watchlist = load_watchlist(settings.config_path)
+        except CONFIG_ERRORS as e:
+            log.error(
+                "cannot reload %s (%s: %s); the watch keeps its current config until the file is fixed",
+                settings.config_path,
+                type(e).__name__,
+                e,
+            )
+            return None
+        refusal = _watch_refusal(settings, watchlist, self.dry_run)
+        if refusal is not None:
+            from .alerts.watch import StopWatch
+
+            raise StopWatch(refusal)
+        self.steps = _watch_steps(settings, watchlist, self.conn, self.clock, dry_run=self.dry_run, kept=self.kept)
+        self.settings, self.watchlist = settings, watchlist
+        log.info("influence watch: config changed, reloaded %s and .env", settings.config_path)
+        return watchlist, self.steps
+
+
+def _config_stamp(settings: Settings) -> tuple[tuple[int, int] | None, ...]:
+    return tuple(_file_stamp(path) for path in (settings.config_path, settings.root / ".env"))
+
+
+def _file_stamp(path: Path) -> tuple[int, int] | None:
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return st.st_mtime_ns, st.st_size
+
+
+def _env_file_values(root: Path) -> dict[str, str]:
+    from dotenv import dotenv_values
+
+    path = root / ".env"
+    if not path.is_file():
+        return {}
+    return {k: v for k, v in dotenv_values(path, encoding="utf-8").items() if v is not None}
+
+
+def _reapply_env(root: Path, before: dict[str, str]) -> dict[str, str]:
+    """Brings this process's environment in line with an edited .env and returns the file's new values.
+    load_dotenv never overrides a variable that is already set, so a key the file set (or now sets) follows the
+    file, and a variable set outside .env still wins, as at startup."""
+    after = _env_file_values(root)
+    for key in before.keys() | after.keys():
+        if os.environ.get(key) != before.get(key):
+            continue
+        if key in after:
+            os.environ[key] = after[key]
+        else:
+            os.environ.pop(key, None)
+    return after
 
 
 def _watch(
     args: argparse.Namespace, settings: Settings, watchlist: Watchlist, conn: sqlite3.Connection, clock: Clock
 ) -> int:
-    if not watchlist.alerts.enabled:
-        print(f"alerts.enabled is false in {settings.config_path}", file=sys.stderr)
+    refusal = _watch_refusal(settings, watchlist, args.dry_run)
+    if refusal is not None:
+        print(refusal, file=sys.stderr)
         return 2
-    if not args.dry_run and not settings.ntfy_topic:
-        print(NO_TOPIC, file=sys.stderr)
-        return 2
+    from .alerts.watch import single_instance
+
+    # One watch per database. A second one, even a --dry-run, would claim alerts from the shared ledger (a dry
+    # run marks them sent) and double the Truth Social polling. The scheduled task's IgnoreNew only stops itself.
+    with single_instance(settings.data_dir / WATCH_LOCK) as mine:
+        if not mine:
+            print(WATCH_RUNNING, file=sys.stderr)
+            log.warning("influence watch: %s", WATCH_RUNNING)
+            return 2
+        return _watch_run(args, settings, watchlist, conn, clock)
+
+
+def _watch_run(
+    args: argparse.Namespace, settings: Settings, watchlist: Watchlist, conn: sqlite3.Connection, clock: Clock
+) -> int:
     from .alerts import watch
 
     run_id = db.start_run(conn, "watch", clock())
     status, error = "ok", None
     try:
-        steps = _watch_steps(settings, watchlist, conn, clock, dry_run=args.dry_run)
-        return watch.run_watch(conn, watchlist, steps, run_id, once=args.once)
+        setup = _WatchSetup(settings, watchlist, conn, clock, dry_run=args.dry_run)
+        return watch.run_watch(conn, setup.watchlist, setup.steps, run_id, once=args.once, reload=setup.reload)
+    except watch.StopWatch as e:
+        _rollback(conn)
+        error = str(e)
+        print(error, file=sys.stderr)
+        log.warning("influence watch stopped: %s", error)
+        return 2
     except KeyboardInterrupt:
         _rollback(conn)
         log.info("influence watch stopped (Ctrl+C)")

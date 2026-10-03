@@ -581,3 +581,37 @@ Facts found while building. Where they contradict a section above, this section 
 - **First full-history result (2026-09-26).** 117 stance-labelled posts; mean signed CAR[0,+1] −0.28%
   (95% CI −0.90% to +0.35%, p = 0.38). The share of |z| > 1.96 in the event window was 5.5%, against 5.6%
   on placebo days. In the pre window it was 11.5% against 5.9%: stocks were already moving before the posts.
+
+## As built — Phase 2 live alerts (2026-10-02)
+
+Design: `docs/superpowers/specs/2026-09-28-live-alerts-design.md`; plan: `docs/superpowers/plans/2026-09-29-live-alerts.md`.
+`influence watch` runs on this PC (Truth Social blocks cloud servers) and pushes ntfy alerts: a heads-up per stock
+post, a 60-minute follow-up, a day-after follow-up and one "while you were away" digest for posts found late.
+
+- **ntfy JSON publish.** Messages are POSTed as JSON to the server root (`topic`, `title`, `message`, `priority`,
+  `tags`, `click`) instead of header fields, because httpx header values must be ASCII and titles carry "⭐" and "·".
+  Bodies are capped at 4,000 bytes; one retry after 5 s.
+- **Ledger.** The `alerts` table (`UNIQUE (kind, platform, native_id)`) is the no-duplicates record. A row is `pending`
+  before sending and `sent` only after a 2xx. Failed sends are retried for 24 h counted from the first failure (not
+  from `due_at`, so an alert first sent late after downtime still gets its retries), then left `failed`.
+- **First-run marking.** The first run marks every existing stock post `skipped` and sends nothing. A post stored before
+  alerts were turned on stays quiet even if a later ticker edit re-tags it.
+- **Stale-bar guard.** A follow-up waits while Yahoo's newest bar is more than 15 minutes older than the window end; it
+  is `skipped` 30 minutes after due rather than reporting a stale price.
+- **Follow-ups.** Day-after notes use the stored earnings dates whatever the latest fetch did, and skip dates outside
+  the XNYS calendar. Follow-ups say "+N more" when a post names more tickers than they list.
+- **Watch process.** One instance per database (`data/watch.lock`, released by the OS if the process dies). It
+  reloads `config/watchlist.yaml` and `.env` when they change, and stops if alerts are switched off or the topic is
+  removed. Each watch collect gets its own `runs` row, so `status` shows its outcomes and rate-limit hits. Waits are
+  sliced so a resume from sleep is not delayed. The PC is kept awake 04:00–20:00 ET on trading days.
+- **The nightly run steps aside** only for the platforms the live watch collects (recorded with each heartbeat; the
+  heartbeat counts as live for 15 minutes). A watch without an X token leaves X to the nightly run.
+- **CLI.** `influence watch` without `NTFY_TOPIC` (and without `--dry-run`) exits 2 before opening a run row.
+  `alerts setup` generates a 32-character topic (`influence-` + 22 random URL-safe characters).
+- **Config.** The `alerts:` block sits above `tickers:` in `watchlist.yaml`, so a ticker appended at the end of the
+  file still lands in the list.
+- **Tests.** 840 passed, 9 deselected (live/slow). Offline throughout: injected clocks, notifiers, price sources and
+  fetchers.
+- **Scheduled task.** `scripts/register_watch_task.ps1` registers "InfluenceTracker Watch" (at logon + daily 03:50,
+  restarts on failure, never two copies), running `scripts/run_watch.cmd` (output in `logs\watch.log`). It does not
+  touch the nightly "InfluenceTracker Daily" task.

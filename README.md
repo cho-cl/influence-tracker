@@ -50,6 +50,30 @@ powershell -ExecutionPolicy Bypass -File scripts\register_task.ps1
 
 Edit `config/watchlist.yaml` to change accounts, subreddits or tickers.
 
+## Live alerts (phone push via ntfy)
+
+```
+uv run influence alerts setup     # makes a private ntfy topic in .env; subscribe to it in the ntfy app
+uv run influence alerts test      # sends a test notification
+uv run influence watch --dry-run  # prints alerts instead of sending them (Ctrl+C to stop)
+powershell -ExecutionPolicy Bypass -File scripts\register_watch_task.ps1   # keep it running (logs\watch.log)
+```
+
+The watch checks Truth Social (and X, with a token) every 5 minutes from 4 AM to 8 PM ET on trading days and every
+30 minutes otherwise. You get:
+
+- a heads-up per post;
+- a follow-up about 60 minutes after the post;
+- a follow-up after the next day's close;
+- one "while you were away" summary for posts found late.
+
+Put the stocks your team holds in `alerts: holdings:` in `config/watchlist.yaml` (they get a star and go first); the
+watch picks up edits to that file without a restart. `influence status` shows when the watch last checked in and how
+many alerts were sent or failed. Only one watch runs at a time, and while it runs the nightly task leaves Truth Social
+(and X, if the watch has the token) to it.
+
+Truth Social can only be checked from this PC (it blocks cloud servers), so alerts stop while the PC is off.
+
 ## Tests
 
 ```

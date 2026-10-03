@@ -610,8 +610,15 @@ post, a 60-minute follow-up, a day-after follow-up and one "while you were away"
   `alerts setup` generates a 32-character topic (`influence-` + 22 random URL-safe characters).
 - **Config.** The `alerts:` block sits above `tickers:` in `watchlist.yaml`, so a ticker appended at the end of the
   file still lands in the list.
-- **Tests.** 840 passed, 9 deselected (live/slow). Offline throughout: injected clocks, notifiers, price sources and
+- **Tests.** 842 passed, 9 deselected (live/slow). Offline throughout: injected clocks, notifiers, price sources and
   fetchers.
 - **Scheduled task.** `scripts/register_watch_task.ps1` registers "InfluenceTracker Watch" (at logon + daily 03:50,
-  restarts on failure, never two copies), running `scripts/run_watch.cmd` (output in `logs\watch.log`). It does not
-  touch the nightly "InfluenceTracker Daily" task.
+  never two copies), running `scripts/run_watch.cmd`. Task Scheduler's restart-on-failure only covers a task that fails
+  to start, so the daily trigger repeats every 5 minutes instead: a crashed watch, or one whose window was closed, is
+  back within 5 minutes. It does not touch the nightly "InfluenceTracker Daily" task.
+- **Logs.** The watch writes its own rotating `logs/influence-watch.log` (two processes rotating one file on Windows
+  lose records), and with `--quiet` (used by the task) only warnings reach `logs\watch.log`.
+- **A follow-up is never due before its heads-up**, so a post found after its close-truncated window is announced first.
+- **Known, not fixed.** With an X token, the watch's 15-minute X runs each get a full day's read allowance (the
+  monthly cap still holds). Truth Social accounts are walked alphabetically, so @realDonaldTrump is last when a rate
+  limit cuts a walk short. After a wake-up the nightly catch-up can overlap the watch's first Truth Social walk.

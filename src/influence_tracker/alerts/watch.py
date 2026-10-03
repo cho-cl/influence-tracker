@@ -63,6 +63,13 @@ class StopWatch(Exception):
 Reload = Callable[[], tuple[Watchlist, Steps] | None]
 
 
+def _beat(conn: sqlite3.Connection, platforms: str, now: datetime) -> str:
+    with conn:
+        db.set_watermark(conn, HEARTBEAT_SOURCE, HEARTBEAT_KEY, to_iso(now), now)
+        db.set_watermark(conn, HEARTBEAT_SOURCE, PLATFORMS_KEY, platforms, now)
+    return to_iso(now)
+
+
 def _safe(name: str, fn: Callable[..., object], *args: object) -> None:
     try:
         result = fn(*args)
@@ -91,9 +98,7 @@ def run_watch(
                 watchlist, steps = _reloaded(reload) or (watchlist, steps)
             cfg = watchlist.alerts
             now = steps.clock()
-            with conn:
-                db.set_watermark(conn, HEARTBEAT_SOURCE, HEARTBEAT_KEY, to_iso(now), now)
-                db.set_watermark(conn, HEARTBEAT_SOURCE, PLATFORMS_KEY, steps.platforms, now)
+            _safe("heartbeat", _beat, conn, steps.platforms, now)
             steps.keep_awake.update(timing.is_active(now))
             _safe("collect:truthsocial", steps.collect_truthsocial, run_id, now)
             if steps.collect_x is not None and (

@@ -56,23 +56,30 @@ Edit `config/watchlist.yaml` to change accounts, subreddits or tickers.
 uv run influence alerts setup     # makes a private ntfy topic in .env; subscribe to it in the ntfy app
 uv run influence alerts test      # sends a test notification
 uv run influence watch --dry-run  # prints alerts instead of sending them (Ctrl+C to stop)
-powershell -ExecutionPolicy Bypass -File scripts\register_watch_task.ps1   # keep it running (logs\watch.log)
+powershell -ExecutionPolicy Bypass -File scripts\register_watch_task.ps1   # keep it running
 ```
 
-The watch checks Truth Social (and X, with a token) every 5 minutes from 4 AM to 8 PM ET on trading days and every
-30 minutes otherwise. You get:
+The watch checks Truth Social every 5 minutes from 4 AM to 8 PM ET on trading days and every 30 minutes otherwise
+(X every 15 minutes, once a token is set). You get:
 
 - a heads-up per post;
-- a follow-up about 60 minutes after the post;
+- a follow-up 60 minutes after the post (for a post outside trading hours: 60 minutes into the next session);
 - a follow-up after the next day's close;
 - one "while you were away" summary for posts found late.
 
 Put the stocks your team holds in `alerts: holdings:` in `config/watchlist.yaml` (they get a star and go first); the
-watch picks up edits to that file without a restart. `influence status` shows when the watch last checked in and how
-many alerts were sent or failed. Only one watch runs at a time, and while it runs the nightly task leaves Truth Social
-(and X, if the watch has the token) to it.
+watch picks up edits to that file and to `.env` without a restart. `influence status` shows when the watch last
+checked in and how many alerts were sent or failed. Only one watch runs at a time, and while it runs the nightly task
+leaves Truth Social (and X, if the watch has the token) to it.
 
-Truth Social can only be checked from this PC (it blocks cloud servers), so alerts stop while the PC is off.
+The scheduled task starts the watch at logon and 03:50, and tries again every 5 minutes if it has stopped. A console
+window stays open while it runs: minimize it (closing it stops alerts for up to 5 minutes). Warnings go to
+`logs\watch.log`, everything to `logs\influence-watch.log`.
+
+Truth Social can only be checked from this PC (it blocks cloud servers), so alerts stop while the PC is off or asleep.
+The watch keeps the PC awake from 4 AM to 8 PM ET on trading days, but a closed laptop lid can still put it to sleep;
+posts made while it sleeps arrive as one summary when it wakes. A `--dry-run` uses up the alerts it prints: they are
+recorded as handled and are not sent again later.
 
 ## Tests
 

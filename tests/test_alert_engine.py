@@ -117,6 +117,19 @@ def test_fresh_post_gets_one_heads_up_and_queued_followups(conn, watchlist):
     assert due["follow_d1"] == "2026-10-01T00:00:00Z"  # Wed Sep 30 20:00 ET
 
 
+def test_followup_of_a_post_found_after_its_window_is_not_due_before_the_heads_up(conn, watchlist):
+    post = datetime(2026, 9, 29, 19, 45, tzinfo=UTC)  # Tue 15:45 ET: the window is cut at the 16:00 close
+    found = post + timedelta(minutes=25)  # 16:10 ET, after window end + 3 min
+    eng = make(conn, watchlist, rec := Recorder())
+    eng.run(post - timedelta(minutes=10))
+    eng.run(found - timedelta(minutes=5))
+    seed(conn, "p1", post, ["NVDA"])
+    eng.run(found)
+    assert rec.sent[0].title == "NVDA · realDonaldTrump · bullish (0.91)"
+    due = {r["kind"]: r["due_at"] for r in conn.execute("SELECT kind, due_at FROM alerts WHERE native_id = 'p1'")}
+    assert due["follow_60m"] == "2026-09-29T20:10:00Z"  # now, not 16:03 ET
+
+
 def test_ignores_reddit_and_benchmark_only_posts(conn, watchlist):
     eng = make(conn, watchlist, rec := Recorder())
     eng.run(T_POST - timedelta(minutes=10))

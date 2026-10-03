@@ -45,11 +45,13 @@ def remove_handlers() -> None:
             handler.close()
 
 
-def setup_logging(logs_dir: Path, level: int = logging.INFO) -> Path:
+def setup_logging(
+    logs_dir: Path, level: int = logging.INFO, *, file_name: str = LOG_FILE_NAME, console_level: int | None = None
+) -> Path:
     """Root logger -> rich console (stderr) + rotating UTF-8 file. Safe to call more than once."""
     remove_handlers()
     logs_dir.mkdir(parents=True, exist_ok=True)
-    log_path = logs_dir / LOG_FILE_NAME
+    log_path = logs_dir / file_name
 
     console_handler = RichHandler(
         console=make_console(stderr=True),
@@ -58,6 +60,8 @@ def setup_logging(logs_dir: Path, level: int = logging.INFO) -> Path:
         rich_tracebacks=False,
         log_time_format="[%Y-%m-%d %H:%M:%S]",
     )
+    if console_level is not None:
+        console_handler.setLevel(console_level)
 
     # delay: a quiet `influence status` never holds the file open, which would block a rollover rename on Windows.
     file_handler = RotatingFileHandler(

@@ -34,6 +34,7 @@ COLLECTOR_STATUSES = ("ok", "partial", "error")
 X_TOKEN_MISSING = "X_BEARER_TOKEN not set in .env"
 WATCH_ALIVE = "live watch is running"
 WATCH_LOCK = "watch.lock"
+WATCH_LOG_FILE = "influence-watch.log"
 WATCH_RUNNING = "another influence watch is already running"
 TOPIC_PREFIX = "influence-"
 NO_TOPIC = "NTFY_TOPIC is not set: run `influence alerts setup` first"
@@ -347,6 +348,9 @@ def build_parser() -> argparse.ArgumentParser:
     watch = sub.add_parser("watch", help="live alerts: check for new stock posts every few minutes and notify phones")
     watch.add_argument("--once", action="store_true", help="run a single cycle and exit")
     watch.add_argument("--dry-run", action="store_true", help="print alerts instead of sending them")
+    watch.add_argument(
+        "--quiet", action="store_true", help="only warnings and errors on the console (the log file keeps everything)"
+    )
     alerts = sub.add_parser("alerts", help="phone alert setup: generate an ntfy topic or send a test notification")
     alerts.add_argument("action", choices=["setup", "test"])
     return parser
@@ -379,7 +383,14 @@ def main(argv: list[str] | None = None) -> int:
         return e.code if isinstance(e.code, int) else 0
 
     settings = load_settings(_root_from_env())
-    setup_logging(settings.logs_dir)
+    if args.command == "watch":
+        # The watch runs for weeks beside the nightly run: its own rotating file, because two processes holding one
+        # RotatingFileHandler file on Windows make the rollover fail and lose records.
+        setup_logging(
+            settings.logs_dir, file_name=WATCH_LOG_FILE, console_level=logging.WARNING if args.quiet else None
+        )
+    else:
+        setup_logging(settings.logs_dir)
     try:
         watchlist = load_watchlist(settings.config_path)
     except CONFIG_ERRORS as e:

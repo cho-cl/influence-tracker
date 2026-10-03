@@ -132,6 +132,16 @@ def test_watch_once_dry_run_wires_every_step(root, monkeypatch):
     assert _runs(root) == [("watch", "ok", None)]
 
 
+def test_watch_logs_to_its_own_file_and_quiet_keeps_info_off_the_console(root, monkeypatch, capsys):
+    monkeypatch.setattr(cli, "_watch_steps", lambda *a, **k: "steps")
+    monkeypatch.setattr(watch_mod, "run_watch", lambda *a, **k: logging.getLogger("t").info("cycle done") or 0)
+    assert cli.main(["watch", "--once", "--dry-run", "--quiet"]) == 0
+    logs = root / "logs"
+    assert "cycle done" in (logs / cli.WATCH_LOG_FILE).read_text(encoding="utf-8")
+    assert not (logs / "influence.log").exists()  # never shares the nightly run's rotating file
+    assert "cycle done" not in capsys.readouterr().err
+
+
 def test_watch_without_a_topic_stops_before_starting(root, monkeypatch, capsys):
     built = []
     monkeypatch.setattr(cli, "_watch_steps", lambda *a, **k: built.append(k))

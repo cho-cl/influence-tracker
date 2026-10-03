@@ -181,7 +181,10 @@ class AlertEngine:
                     continue
                 window = timing.follow_window(info.created_at, d0, self.cfg.followup_minutes)
                 db.add_alert(self.conn, "heads_up", platform, native_id, now, now)
-                db.add_alert(self.conn, "follow_60m", platform, native_id, window.end + timing.FOLLOW_DELAY, now)
+                # Never due before the heads-up: a post found after its (close-truncated) window must not be
+                # followed up before it is announced; `ORDER BY due_at, id` then sends the heads-up first.
+                due = max(window.end + timing.FOLLOW_DELAY, now)
+                db.add_alert(self.conn, "follow_60m", platform, native_id, due, now)
                 counts["new"] += 1
             if late:
                 msg = messages.digest(late)

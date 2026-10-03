@@ -68,6 +68,7 @@ def show_status(conn: sqlite3.Connection, watchlist: Watchlist, now: datetime, c
     _posts(console, conn, now)
     _stances(console, conn, watchlist)
     _events(console, conn, now)
+    _alerts(console, conn, now)
     _top_tickers(console, conn)
     _accounts(console, conn, watchlist, now)
     _x_spend(console, conn, watchlist, now)
@@ -300,6 +301,39 @@ def _events(console: Console, conn: sqlite3.Connection, now: datetime) -> None:
         else:
             _say(console, line)
     _say(console, "'influence events' lists them for checking against price charts.", "dim")
+
+
+def _alerts(console: Console, conn: sqlite3.Connection, now: datetime) -> None:
+    from .alerts.timing import is_active
+    from .alerts.watch import HEARTBEAT_FRESH
+
+    _heading(console, "Alerts")
+    beat = db.get_watermark(conn, "watch", "heartbeat")
+    if beat is None:
+        _say(console, "watch has never run (start it with `influence watch` or register the watch task)", "dim")
+    else:
+        stale = now - from_iso(beat) >= HEARTBEAT_FRESH
+        note = " STALE — the watch is not running" if stale and is_active(now) else ""
+        _say(console, f"watch last check-in: {_when(beat, now)}{note}", "bold red" if note else "")
+    since = to_iso(now - timedelta(days=7))
+    table = _table("kind", "sent", "failed", "skipped", "pending")
+    rows = conn.execute(
+        """SELECT kind, status, COUNT(*) AS n FROM alerts WHERE created_at >= ? OR due_at >= ?
+           GROUP BY kind, status""",
+        (since, since),
+    ).fetchall()
+    by_kind: dict[str, dict[str, int]] = {}
+    for r in rows:
+        by_kind.setdefault(r["kind"], {})[r["status"]] = r["n"]
+    for kind in ("heads_up", "follow_60m", "follow_d1", "digest"):
+        c = by_kind.get(kind, {})
+        _row(table, kind, *(str(c.get(s, 0)) for s in ("sent", "failed", "skipped", "pending")))
+    console.print(table)
+    pending = conn.execute(
+        "SELECT COUNT(*) FROM alerts WHERE status = 'pending' AND kind IN ('follow_60m', 'follow_d1')"
+    ).fetchone()[0]
+    failed = conn.execute("SELECT COUNT(*) FROM alerts WHERE status = 'failed'").fetchone()[0]
+    _say(console, f"pending follow-ups: {pending} · failed sends: {failed} (last 7 days above)")
 
 
 def _top_tickers(console: Console, conn: sqlite3.Connection) -> None:
